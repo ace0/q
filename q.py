@@ -148,7 +148,7 @@ def _runWithStdin(cmd, input):
   """
   Runs @cmd, passes the string @input to the process, and 
   returns stdout or any errors.
-  @returns (stdout, err)
+  @returns (ok, output)
   """
   proc = subprocess.Popen(
     cmd, 
@@ -165,13 +165,10 @@ def _runWithStdin(cmd, input):
     proc.poll()
     sleep(1)
 
-  stdout = proc.stdout.read().decode('utf-8')
+  output = proc.stdout.read().decode('utf-8')
   proc.stdout.close()
 
-  if proc.returncode == 0:
-    return stdout, None
-  else:
-    return None, stdout
+  return (proc.returncode == 0, output)
 
 # Run!
 if __name__ == '__main__':
