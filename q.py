@@ -2,7 +2,7 @@
 Q: a python library and command-line tool for managing a quorum of hardware 
 devices (Yubikeys) required to unlock a secret.
 """
-from subprocess import run, PIPE, STDOUT
+from subprocess import PIPE, STDOUT
 from time import sleep
 import subprocess
 import fire
@@ -51,13 +51,12 @@ class Cli:
   def __init__(self):
     pass
 
-  def test(self, pubkeyfile, ctxtfile):
-    # err = Crypto.genPubkeyPair(pubkeyfile)
-    # if err:
-    #   print(f"ERROR: {err}")
+  def genkey(pubkeyfile):
+    err = Crypto.genPubkeyPair(pubkeyfile)
+    if err:
+      print(f"ERROR: {err}")
 
-    # return
-
+  def encrypt(self, pubkeyfile, ctxtfile):
     err = Crypto.encrypt(
       plaintext="hello, world", 
       pubkeyfile=pubkeyfile, 
@@ -65,13 +64,22 @@ class Cli:
     if err:
       print(f"ERROR: {err}")
 
+  def decrypt(self, ctxtfile):
+    ok, result = Crypto.decrypt(ctxtfile)
+    if ok:
+      print(f"Recovered: '{result}'")
+    else:
+      print(f"ERROR: {result}")
+
 class Crypto:
   """
   Interface to crypto operations.
   """
   # We're using the 9c slot on Yubico device to store privkeys.
   # -- not a requirement, just convention.
+  # In the pkcs15-tool, this is designated key 3
   PRIVKEY_SLOT = "9c"
+  KEY_NUMBER = "3"
 
   def __init__(self):
     pass
@@ -82,9 +90,8 @@ class Crypto:
     yubico-piv-tool command (called via subprocess). Privkey is
     stored on the device and pubkey is written to pubkeyfile.
     """
-
     # TODO: Change these to long form for ease of maintenance
-    result = run(
+    result = subprocess.run(
       ["yubico-piv-tool",
         "-a", "generate",
         "-a", "verify",
@@ -107,38 +114,64 @@ class Crypto:
     using a pubkey read from a file. The resulting ciphertext is 
     written to ctxfile.
     """
-    proc = subprocess.Popen(
-      ["openssl", 
+    _, err = runWithStdin(
+      cmd=["openssl", 
         "pkeyutl", "-encrypt",
         "-pubin",
         "-inkey", pubkeyfile,
         "-out", ctxtfile,
       ], 
-      stdin=PIPE,
-      stdout=PIPE, 
-      stderr=STDOUT)
-
-    # Write the plaintext to STDIN
-    proc.stdin.write(plaintext.encode("utf-8"))
-    proc.stdin.close()
-
-    # Wait for openssl to finish
-    while proc.returncode is None:
-      proc.poll()
-      sleep(1)
-
-    if proc.returncode == 0:
-      err = None
-    else:
-      err = proc.stdout.read().decode('utf-8')
-
-    proc.stdout.close()
+      input=plaintext)
     return err
 
+  def decrypt(ctxtfile, pin="123456"):
+    return run(
+      ["pkcs15-crypt",
+        "--decipher", 
+        "-i", ctxtfile,
+        "t", "-o", "/dev/stdout", 
+        "--pkcs1", 
+        "-p", pin, 
+        "--key", Crypto.KEY_NUMBER]
+      )
+    # [file-encryption]: pkcs15-crypt --decipher -i test-file.enc t -o /dev/stdout --pkcs1 -p $PIN --key 3
 
-# openssl pkeyutl -encrypt -certin -inkey cert -out test-file.enc
-# hello world
-# [file-encryption]: pkcs15-crypt --decipher -i test-file.enc t -o /dev/stdout --pkcs1 -p $PIN --key 3
+def run(cmd):
+  """
+  Runs @cmd and captures stdout and stderr.
+  """
+  result = subprocess.run(cmd, stdout=PIPE)
+  output =result.stdout.decode("utf-8")
+  return (result.returncode == 0, output)
+
+def _runWithStdin(cmd, input):
+  """
+  Runs @cmd, passes the string @input to the process, and 
+  returns stdout or any errors.
+  @returns (stdout, err)
+  """
+  proc = subprocess.Popen(
+    cmd, 
+    stdin=PIPE,
+    stdout=PIPE, 
+    stderr=STDOUT)
+
+  # Write the plaintext to STDIN
+  proc.stdin.write(input.encode("utf-8"))
+  proc.stdin.close()
+
+  # Wait for openssl to finish
+  while proc.returncode is None:
+    proc.poll()
+    sleep(1)
+
+  stdout = proc.stdout.read().decode('utf-8')
+  proc.stdout.close()
+
+  if proc.returncode == 0:
+    return stdout, None
+  else:
+    return None, stdout
 
 # Run!
 if __name__ == '__main__':
