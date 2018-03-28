@@ -2,54 +2,40 @@
 Q: a python library and command-line tool for managing a quorum of hardware 
 devices (Yubikeys) required to unlock a secret.
 """
+from base64 import (
+  urlsafe_b64encode as b64enc, 
+  urlsafe_b64decode as b64dec)
 from subprocess import PIPE, STDOUT
+from secrets import token_bytes as randomBytes
 from time import sleep
+from collections import namedtuple
 import subprocess
+
+from Crypto.Hash import SHA256
+import gfshare
 import fire
 
-usage = \
-"""
-q COMMAND [OPTIONS]
-Manage a quorum of hardware devices (Yubikeys) used to protect a secret.
-
-COMMANDS
-
-q newdevice
-Print gpg instructions for initializing a new Yubikey with a public/private 
-keypair.
-
-
-q split K N [--keysize BITS] [--pubkeydir DIR] [--out PATH]
-Generate and split a new random secret and encrypt each share using public
-keys.
-
-K          K (decrypted) shares represents a quorom and can be used to recover 
-            the secret (2 or 3 is a common setting).
-N          N shares are created (N must be larger or equal to K).
-keysize    The size of the new secret in bits; default=128.
-pubkeydir  Public keys for encrypting the keyshares are found in this 
-            directory; default=./
-output     Write the encrypted bundle of shares to this location; 
-            default=./quorum-secret
-
-q recover BUNDLE [--out PATH] [--print]
-Recover a secret from the encrypted bundle. Prompt for individual 
-hardware devices to be inserted.
-
-BUNDLE    The bundle of encrypted shares
-out       Write the output here; default is a temp file and path is printed
-           to STDERR.
-print     Print the recovered secret to STDOUT and don't write the output to
-           a file.
-
-
-q resplit BUNDLE K N [--pubkeydir DIR [--out PATH]
-Recover and then re-split and re-encrypt a secret.
-"""
+secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShare")
 
 class Cli:
+  """
+  Command line interface to Q.
+  """
   def __init__(self):
     pass
+
+  def split(self, k, n, length=128, pubkeydir="./", 
+    out="./secrete-bundle.json"):
+    """
+    Generate a new secret and split it into shares.
+    """
+    k, n = int(k), int(n)
+    shares = Crypto.splitSecret(bits=length, k=k, n=n)
+
+    # Maps pubkey fingerprint => (coefficient, encryptedShare)
+    bundle = {}
+
+    # Encrypt each share.
 
   def genkey(pubkeyfile):
     err = Crypto.genPubkeyPair(pubkeyfile)
@@ -76,13 +62,24 @@ class Crypto:
   Interface to crypto operations.
   """
   # We're using the 9c slot on Yubico device to store privkeys.
-  # -- not a requirement, just convention.
+  # This is not a requirement, just our convention.
   # In the pkcs15-tool, this is designated key 3
-  PRIVKEY_SLOT = "9c"
-  KEY_NUMBER = "3"
+  YUBICO_PRIVKEY_SLOT = "9c"
+  PKCS15_KEY_NUMBER = "3"
 
   def __init__(self):
     pass
+
+  def splitSecret(bits=128, k=3, n=5):
+    """
+    Generate a new secret and split into shares
+    """
+    if k > n:
+      raise ValueError(f"Quorum K cannot be larger than total number "
+        "of shares N. Instead found K={k} and N={n}")
+
+    secret = randomBytes(nbytes=int(bits/8))
+    return gfshare.split(k, n, bytes(secret))
 
   def genPubkeyPair(pubkeyfile):
     """
@@ -94,8 +91,7 @@ class Crypto:
     result = subprocess.run(
       ["yubico-piv-tool",
         "-a", "generate",
-        "-a", "verify",
-        "-s", Crypto.PRIVKEY_SLOT],
+        "-s", Crypto.YUBICO_PRIVKEY_SLOT],
         stdout=PIPE
         )
 
@@ -132,9 +128,15 @@ class Crypto:
         "t", "-o", "/dev/stdout", 
         "--pkcs1", 
         "-p", pin, 
-        "--key", Crypto.KEY_NUMBER]
-      )
-    # [file-encryption]: pkcs15-crypt --decipher -i test-file.enc t -o /dev/stdout --pkcs1 -p $PIN --key 3
+        "--key", Crypto.PKCS15_KEY_NUMBER
+      ])
+
+  def fingerprint(data):
+    """
+    Generates base64 encoded fingerprint using SHA256. 
+    Particularly useful for identifying pubkeys.
+    """
+    return SHA256.new(data=pubkey.exportKey(format='PEM')).digest()
 
 def run(cmd):
   """
@@ -169,6 +171,46 @@ def _runWithStdin(cmd, input):
   proc.stdout.close()
 
   return (proc.returncode == 0, output)
+
+usage = \
+"""
+q COMMAND [OPTIONS]
+Manage a quorum of hardware devices (Yubikeys) used to protect a secret.
+
+COMMANDS
+
+q enroll
+Enroll a new device; set the PIN; and generate a pubkey pair.
+
+q split K N [--length BITS] [--pubkeydir DIR] [--out PATH]
+Generate and split a new random secret and encrypt each share using public
+keys.
+
+K          K (decrypted) shares represents a quorom and can be used to recover 
+            the secret (2 or 3 is a common setting).
+N          N shares are created (N must be larger or equal to K).
+keysize    The size of the new secret in bits; default=128.
+pubkeydir  Public keys for encrypting the keyshares are found in this 
+            directory; default=./
+output     Write the encrypted bundle of shares to this location; 
+            default=./quorum-secret
+
+q recover BUNDLE [--out PATH] [--print]
+Recover a secret from the encrypted bundle. Prompt for individual 
+hardware devices to be inserted.
+
+BUNDLE    The bundle of encrypted shares
+out       Write the output here; default is a temp file and path is printed
+           to STDERR.
+print     Print the recovered secret to STDOUT and don't write the output to
+           a file.
+
+q resplit BUNDLE K N [--pubkeydir DIR [--out PATH]
+Recover and then re-split and re-encrypt a secret.
+"""
+# TODO: Establish PIN policy. 
+# Maybe: gen during pubkey creation and store alongside pubkeys.
+# Set mngmt key, PUK, and PIN
 
 # Run!
 if __name__ == '__main__':
