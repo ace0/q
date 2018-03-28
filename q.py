@@ -5,6 +5,7 @@ devices (Yubikeys) required to unlock a secret.
 from base64 import (
   urlsafe_b64encode as b64enc, 
   urlsafe_b64decode as b64dec)
+from hashlib import sha256
 from subprocess import PIPE, STDOUT
 from secrets import token_bytes as randomBytes
 from time import sleep
@@ -24,18 +25,30 @@ class Cli:
   def __init__(self):
     pass
 
-  def split(self, k, n, length=128, pubkeydir="./", 
+  def split(self, k, n, length=128, pubkeydir=".", 
     out="./secrete-bundle.json"):
     """
-    Generate a new secret and split it into shares.
+    Generate a new secret, split it into shares, encrypt them, and write 
+    them in a bundle to a file.
     """
+    # TODO: Add extension option, ext=.pubkey
+    # Verify cmd line arguments
     k, n = int(k), int(n)
+    pubkeyfiles = glob(f"{pubkeydir}/*.pubkey")
+    if n != len(pubkeyfiles):
+      print(f"ERROR: The total number of shares, N, must match the number of "
+        "pubkey files. Instead found N={n}, number of pubkeyfiles="
+        "{len(pubkeyfiles)}")
+      exit(1)
+
     shares = Crypto.splitSecret(bits=length, k=k, n=n)
 
     # Maps pubkey fingerprint => (coefficient, encryptedShare)
     bundle = {}
 
     # Encrypt each share.
+    for pkfile, coeff, share in zip(pubkeyfiles, shares.items()):
+      print(f"{pkfile} {coeff} {share}")
 
   def genkey(pubkeyfile):
     err = Crypto.genPubkeyPair(pubkeyfile)
@@ -136,7 +149,7 @@ class Crypto:
     Generates base64 encoded fingerprint using SHA256. 
     Particularly useful for identifying pubkeys.
     """
-    return SHA256.new(data=pubkey.exportKey(format='PEM')).digest()
+    return b64enc(sha256(data).digest())
 
 def run(cmd):
   """

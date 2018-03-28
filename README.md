@@ -11,6 +11,8 @@ MacOS:
 ```
 brew install libgfshare
 pip install gfshare
+
 git clone https://github.com/ace0/q
+
 ```
 
