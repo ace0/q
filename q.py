@@ -2,21 +2,21 @@
 Q: a python library and command-line tool for managing a quorum of hardware 
 devices (Yubikeys) required to unlock a secret.
 """
-from base64 import (
-  urlsafe_b64encode as b64enc, 
-  urlsafe_b64decode as b64dec)
+from base64 import urlsafe_b64encode, urlsafe_b64decode
+from collections import namedtuple
+from glob import glob
 from hashlib import sha256
+from json import dumps as jsonEnc, loads as jsonDec
 from subprocess import PIPE, STDOUT
 from secrets import token_bytes as randomBytes
 from time import sleep
-from collections import namedtuple
+
 import subprocess
 
-from Crypto.Hash import SHA256
-import gfshare
-import fire
+import gfshare, fire
 
-secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShare")
+secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShareFile")
+MANIFEST = "manifest.json"
 
 class Cli:
   """
@@ -25,8 +25,7 @@ class Cli:
   def __init__(self):
     pass
 
-  def split(self, k, n, length=128, pubkeydir=".", 
-    out="./secrete-bundle.json"):
+  def split(self, k, n, length=128, pubkeydir=".", outdir="./bundle"):
     """
     Generate a new secret, split it into shares, encrypt them, and write 
     them in a bundle to a file.
@@ -44,11 +43,52 @@ class Cli:
     shares = Crypto.splitSecret(bits=length, k=k, n=n)
 
     # Maps pubkey fingerprint => (coefficient, encryptedShare)
-    bundle = {}
+    manifest = { "K": k, "N": n}
 
-    # Encrypt each share.
-    for pkfile, coeff, share in zip(pubkeyfiles, shares.items()):
+    # LEFT OFF: Implementing encryption of individual shares
+    # Encrypt each share under a distinct pubkey
+    for (pkfile, (coeff, share)) in zip(pubkeyfiles, shares.items()):
       print(f"{pkfile} {coeff} {share}")
+
+      # Encrypt the share and write it to a file
+      sharefile = f"share-{coeff}.ctxt"
+      Crypto.encrypt(
+        plaintext=share,
+        pubkeyfile=pkfile, 
+        ctxtfile=f"{outdir}/{sharefile}")
+
+      # Stores these detes into the manifest
+      fp = Crypto.fingerprintFile(pkfile)
+      manifest[fp] = secretShareEntry(
+        coeff=coeff, 
+        encryptedShareFile=sharefile)
+
+    # Write the manifest file
+    print(manifest)
+    with open(f"{outdir}/{MANIFEST}", 'wt') as f:
+      f.write(jsonEnc(manifest))
+
+  def recover(self, bundle_dir):
+    """
+    Recover a secret from a bundle of encrypted shares.
+    """
+    # Load the manifest file.
+    with open(f"{bundle_dir}/{MANIFEST}", 'rt') as f:
+      manifest = jsonDec(f.read())
+
+    # TODO: Verify the manifest contain the expected contents: k, n, etc
+    k = manifest["K"]
+    shares = {}
+    for coeff, sharefile in identifyShares(manifest, k):
+      ok, result = Crypto.decrypt(f"{bundle_dir}/{sharefile}")
+      if not ok:
+        print("ERROR: Decryption of {bundle_dir}/{sharefile} failed: {result}")
+        exit(1)
+      shares[coeff] = result
+
+    # Recover the secret
+    print(shares)
+    print(b64enc(Crypto.recoverSecret(shares)))
 
   def genkey(pubkeyfile):
     err = Crypto.genPubkeyPair(pubkeyfile)
@@ -94,6 +134,20 @@ class Crypto:
     secret = randomBytes(nbytes=int(bits/8))
     return gfshare.split(k, n, bytes(secret))
 
+  def recoverSecret(shares):
+    """
+    Receovers a secret from a dict {coeff: share}
+    """
+    return gfshare.combine(shares)
+
+  def readPubkey():
+    """
+    Read the pubkey from an attached Yubikey
+    """
+    return run(
+      ["pkcs15-tool", 
+       "--read-public-key", Crypto.PKCS15_KEY_NUMBER])
+
   def genPubkeyPair(pubkeyfile):
     """
     Generates a new pubkey pair on a Yubico device using the 
@@ -109,7 +163,7 @@ class Crypto:
         )
 
     if result.returncode != 0:
-      return result.stderr.encode("utf-8")
+      return se(result.stderr)
 
     # Write the pubkey to a file
     with open(pubkeyfile, "wb") as out:
@@ -130,7 +184,7 @@ class Crypto:
         "-inkey", pubkeyfile,
         "-out", ctxtfile,
       ], 
-      input=plaintext)
+      cmdInput=plaintext)
     return err
 
   def decrypt(ctxtfile, pin="123456"):
@@ -144,24 +198,92 @@ class Crypto:
         "--key", Crypto.PKCS15_KEY_NUMBER
       ])
 
-  def fingerprint(data):
+  def fingerprintFile(filename):
     """
-    Generates base64 encoded fingerprint using SHA256. 
-    Particularly useful for identifying pubkeys.
+    Generates base64 encoded fingerprint using SHA256 over a file.
+    Assumes small files.
     """
-    return b64enc(sha256(data).digest())
+    blocksize = 65536
+    with open(filename, 'rb') as f:
+      return tb64enc(sha256(f.read()).digest())
+
+  def fingerprint(datum):
+    """
+    Generates base64 encoded fingerprint using SHA256 over in-memory value.
+    """
+    return b64enc(sha256(toBytes(datum)).digest())
+
+def identifyShares(manifest, k):
+  """
+  Prompts the user to insert a Yubikey, identify the device by it's pubkey 
+  fingerprint and match that against a manifest entry. Continues until it
+  recovers k shares.
+  @yields: (coeff, sharefile)
+  """
+  for i in range(k):
+    ok = False
+    while not ok:
+      input(f"Insert Yubikey and press <enter> [{i+1} of {k}]:")
+      ok, pubkey = Crypto.readPubkey()
+
+      if not ok:
+        continue
+
+      # TODO: Check pubkey against the manifest
+      fp = Crypto.fingerprint(pubkey)
+      # if not fp in manifest:
+      #    print("Cannot find this pubkey in the manifest")
+      #    continue
+      # print(f"Located pubkey {fp} in manifest")
+
+      # HACK: because we have only one yubikey for development
+      coeff, sharefile = getShare(manifest)
+      # coeff, sharefile = manifest[fp]
+      print(f"{coeff}: {sharefile}")
+      yield coeff, sharefile
+
+# HACK: because we have only one yubikey for development
+def getShare(manifest):
+  for k,v in manifest.items():
+    if k != "K" and k != "N":
+      del manifest[k]
+      return v
+
+# Encode a bytes object in base64 and return a str object.
+b64enc = lambda x: toStr(urlsafe_b64encode(x))
+
+# Encode a bytes object in base64 and return a str object.
+b64dec = lambda x: toBytes(urlsafe_b64decode(x))
+
+def toStr(b):
+  """
+  Converts a utf-8 bytes object to a string.
+  """
+  if type(b) == str:
+    return b
+  else:
+    return b.decode("utf-8")
+
+def toBytes(b):
+  """
+  Converts a string to a bytes object by encoding it as utf-8.
+  """
+  if type(b) == str:
+    return b.encode("utf-8")
+  else:
+    return b
 
 def run(cmd):
   """
-  Runs @cmd and captures stdout and stderr.
+  Runs @cmd and captures stdout.
   """
   result = subprocess.run(cmd, stdout=PIPE)
-  output =result.stdout.decode("utf-8")
+  output =result.stdout
   return (result.returncode == 0, output)
 
-def _runWithStdin(cmd, input):
+def runWithStdin(cmd, cmdInput):
   """
-  Runs @cmd, passes the string @input to the process, and 
+  Runs @cmd, passes the string @cmdInput to the process, and 
   returns stdout or any errors.
   @returns (ok, output)
   """
@@ -172,7 +294,7 @@ def _runWithStdin(cmd, input):
     stderr=STDOUT)
 
   # Write the plaintext to STDIN
-  proc.stdin.write(input.encode("utf-8"))
+  proc.stdin.write(cmdInput)
   proc.stdin.close()
 
   # Wait for openssl to finish
@@ -180,7 +302,7 @@ def _runWithStdin(cmd, input):
     proc.poll()
     sleep(1)
 
-  output = proc.stdout.read().decode('utf-8')
+  output = proc.stdout.read()
   proc.stdout.close()
 
   return (proc.returncode == 0, output)
@@ -208,15 +330,15 @@ pubkeydir  Public keys for encrypting the keyshares are found in this
 output     Write the encrypted bundle of shares to this location; 
             default=./quorum-secret
 
-q recover BUNDLE [--out PATH] [--print]
+q recover BUNDLE_DIR [--out PATH] [--print]
 Recover a secret from the encrypted bundle. Prompt for individual 
 hardware devices to be inserted.
 
-BUNDLE    The bundle of encrypted shares
-out       Write the output here; default is a temp file and path is printed
-           to STDERR.
-print     Print the recovered secret to STDOUT and don't write the output to
-           a file.
+BUNDLE_DIR  The bundle of encrypted shares in a directory.
+out         Write the output here; default is a temp file and path is printed
+              to STDERR.
+print       Print the recovered secret to STDOUT and don't write the output to
+              a file.
 
 q resplit BUNDLE K N [--pubkeydir DIR [--out PATH]
 Recover and then re-split and re-encrypt a secret.

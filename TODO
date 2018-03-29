@@ -2,20 +2,9 @@ TODO
 
 Phase: split and recombine
 
-Split cmd
-- encrypt shares
-- Write shares to a bundle
-- decrypt shares
-- recombine
-
 Enroll device command
 - Enroll device, record pubkey and PINs in settings file
 - Read settings file
-
-Recover cmd
-- Identify device on insert by pubkey
-- Prompt for device insertion
-- Show progress
 
 
 - Add documentation for manual investigation and recovery
