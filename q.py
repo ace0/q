@@ -44,9 +44,13 @@ class Cli:
     pin = strOrNone(pin)
     managementKey = strOrNone(managementKey)
 
+    # Prompt the operator to insert a device
+    Crypto.promptDeviceInsertion()
+
     mgmKey = "010203040506070801020304050607080102030405060708"
     # TODO: Generate a random 24 byte management key and encode as hex
     # DEBUG: Disabled while we dev other things
+    # print("Setting device management key")
     # ok, result = Crypto.setMgmKey(current=managementKey, new=mgmtKey)
     # if not ok:
     #   print(f"ERROR: Failed to set management key:\n{result}")
@@ -54,6 +58,7 @@ class Cli:
     #   print("Established new management key")
 
     # TODO: Select random 8 digit pin
+    # print("Setting administrative PIN")
     newAdminPin = "11002200"
     # DEBUG: Disabled during development
     # ok, _ = Crypto.setAdminPin(new=newAdminPin, current=adminPin)
@@ -64,6 +69,7 @@ class Cli:
 
     # TODO: Select random 6 digit pin
     newPin = "123456"
+    # print("Setting operations PIN")
     # DEBUG: Disabled during development
     # ok, _ = Crypto.setPin(newPin, pin)
     # if not ok:
@@ -71,7 +77,21 @@ class Cli:
     # else:
     # print("Established new user PIN")
 
-      
+    # TODO: On failure: we need to emit PIN, MGMTKEY, ADMIN PIN or device
+    #       will be unusable
+
+    # LEFT OFF: Need to generate pubkeyfile name to test this
+    pubkeyfile = f"{bundleDir}/Test-device.pubkey"
+    print("Generating new key pair on device")
+    ok = Crypto.genPubkeyPair(pubkeyfile)
+    if not ok:
+      print("Failed to generate pubkey pair")
+      exit(1)
+
+    # TODO: Write particulars to a manifest file
+    # Should we ditch the current fingerprint method and switch the 
+    # fingerprint shown in yubic-piv-tool --action=status ?
+    # Seems cleaner
 
   def split(self, k, n, length=128, pubkeydir=".", outdir="./bundle"):
     """
@@ -204,21 +224,32 @@ class Crypto:
     stored on the device and pubkey is written to pubkeyfile.
     """
     # TODO: Change these to long form for ease of maintenance
-    result = subprocess.run(
+    ok, result = run(
       ["yubico-piv-tool",
-        "-a", "generate",
-        "-s", Crypto.YUBICO_PRIVKEY_SLOT],
-        stdout=PIPE
-        )
+        "--action=generate",
+        f"--slot={Crypto.YUBICO_PRIVKEY_SLOT}"])
 
-    if result.returncode != 0:
-      return se(result.stderr)
+    if not ok:
+      return ok
 
     # Write the pubkey to a file
     with open(pubkeyfile, "wb") as out:
-      out.write(result.stdout)
+      out.write(result)
 
-    return None
+    return True
+
+  def promptDeviceInsertion(msg="Insert Yubikey and press enter: "):
+    """
+    Prompts for the operator to insert a key and probes the device with 
+    version command. Continues to prompt until a Yubikey is detected.
+    """
+    ok = False
+    while not ok:
+      input(msg)
+      # The version command will fail if a Yubico device is not present.
+      ok, _ = run(["yubico-piv-tool", "--action=version"], printErrorMsg=False)
+      if not ok:
+        print("Failed to detect device\n")
 
   def setAdminPin(new, current=None):
     """
@@ -373,7 +404,7 @@ def toBytes(b):
   else:
     return b
 
-def run(cmd, echo=True, printErrorMsg=True):
+def run(cmd, echo=False, printErrorMsg=True):
   """
   Runs @cmd and captures stdout.
   """
