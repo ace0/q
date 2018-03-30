@@ -1,13 +1,32 @@
 TODO
 
-Phase: split and recombine
+Enroll a new yubikey
+- enroll cmd
+- Prompt for insertion
+- Generate a new pubkey
+- Write pubkey file
+- Write pubkey fp, pubkey filename, MGMT key, PIN, PUK to device manifest
 
-Enroll device command
-- Enroll device, record pubkey and PINs in settings file
-- Read settings file
+De-enroll a yubikey
+- Delete pubkey file
+- Update device manifest
 
+Resplit
+- Recover secret
+- Delete existing bundle
+- Split and write new bundle
 
-- Add documentation for manual investigation and recovery
+HSM unlocking and key wrapping
+- Generate a wrap key on HSM
+- Generate a privkey on HSM
+- Export privkey under key wrap
+- Delete privkey on device
+- Import wrapped privkey and unwrap
+- Set HSM unlock code, admin pin or whatevs
+- Use Q to encrypt or store unlock code
+
+???
+Add documentation for manual investigation and recovery
   - pkcs15-tool --read-public-key 3 
   - PIN verification
 

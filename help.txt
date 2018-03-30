@@ -37,4 +37,87 @@ Options:
       --use-pinpad              Do not prompt the user; if no PINs supplied, pinpad will be used.
 
 
+
+yubico-piv-tool 1.5.0
+
+Usage: yubico-piv-tool [OPTIONS]...
+
+  -h, --help               Print help and exit
+      --full-help          Print help, including hidden options, and exit
+  -V, --version            Print version and exit
+  -v, --verbose[=INT]      Print more information  (default=`0')
+  -r, --reader=STRING      Only use a matching reader  (default=`Yubikey')
+  -k, --key[=STRING]       Management key to use, if no value is specified key
+                             will be asked for
+                             (default=`010203040506070801020304050607080102030405060708')
+  -a, --action=ENUM        Action to take  (possible values="version",
+                             "generate", "set-mgm-key", "reset",
+                             "pin-retries", "import-key",
+                             "import-certificate", "set-chuid",
+                             "request-certificate", "verify-pin",
+                             "change-pin", "change-puk", "unblock-pin",
+                             "selfsign-certificate", "delete-certificate",
+                             "read-certificate", "status",
+                             "test-signature", "test-decipher",
+                             "list-readers", "set-ccc", "write-object",
+                             "read-object", "attest")
+
+       Multiple actions may be given at once and will be executed in order
+       for example --action=verify-pin --action=request-certificate
+
+  -s, --slot=ENUM          What key slot to operate on  (possible
+                             values="9a", "9c", "9d", "9e", "82",
+                             "83", "84", "85", "86", "87", "88",
+                             "89", "8a", "8b", "8c", "8d", "8e",
+                             "8f", "90", "91", "92", "93", "94",
+                             "95", "f9")
+
+       9a is for PIV Authentication
+       9c is for Digital Signature (PIN always checked)
+       9d is for Key Management
+       9e is for Card Authentication (PIN never checked)
+       82-95 is for Retired Key Management
+       f9 is for Attestation
+
+  -A, --algorithm=ENUM     What algorithm to use  (possible values="RSA1024",
+                             "RSA2048", "ECCP256", "ECCP384"
+                             default=`RSA2048')
+  -H, --hash=ENUM          Hash to use for signatures  (possible
+                             values="SHA1", "SHA256", "SHA384",
+                             "SHA512" default=`SHA256')
+  -n, --new-key=STRING     New management key to use for action set-mgm-key, if
+                             omitted key will be asked for
+      --pin-retries=INT    Number of retries before the pin code is blocked
+      --puk-retries=INT    Number of retries before the puk code is blocked
+  -i, --input=STRING       Filename to use as input, - for stdin  (default=`-')
+  -o, --output=STRING      Filename to use as output, - for stdout
+                             (default=`-')
+  -K, --key-format=ENUM    Format of the key being read/written  (possible
+                             values="PEM", "PKCS12", "GZIP", "DER",
+                             "SSH" default=`PEM')
+  -p, --password=STRING    Password for decryption of private key file, if
+                             omitted password will be asked for
+  -S, --subject=STRING     The subject to use for certificate request
+
+       The subject must be written as:
+       /CN=host.example.com/OU=test/O=example.com/
+
+      --serial=INT         Serial number of the self-signed certificate
+      --valid-days=INT     Time (in days) until the self-signed certificate
+                             expires  (default=`365')
+  -P, --pin=STRING         Pin/puk code for verification, if omitted pin/puk
+                             will be asked for
+  -N, --new-pin=STRING     New pin/puk code for changing, if omitted pin/puk
+                             will be asked for
+      --pin-policy=ENUM    Set pin policy for action generate or import-key.
+                             Only available on YubiKey 4  (possible
+                             values="never", "once", "always")
+      --touch-policy=ENUM  Set touch policy for action generate, import-key or
+                             set-mgm-key. Only available on YubiKey 4
+                             (possible values="never", "always",
+                             "cached")
+      --id=INT             Id of object for write/read object
+  -f, --format=ENUM        Format of data for write/read object  (possible
+                             values="hex", "base64", "binary"
+                             default=`hex')
   

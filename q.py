@@ -16,7 +16,8 @@ import subprocess
 import gfshare, fire
 
 secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShareFile")
-MANIFEST = "manifest.json"
+SECRET_SHARE_MANIFEST = "shares-manifest.json"
+DEVICE_MANIFEST = "device-manifest.json"
 
 class Cli:
   """
@@ -24,6 +25,53 @@ class Cli:
   """
   def __init__(self):
     pass
+
+  def enroll(self, bundleDir="./bundle", adminPin=None, pin=None, 
+    managementKey=None):
+    """
+    Enrolls a new Yubikey device for secrets management. 
+    """
+    # Converts numeric values to strings, but leaves None values the same.
+    def strOrNone(x):
+      if x is None:
+        return None
+      if type(x) == int:
+        return str(x)
+      else:
+        return x
+
+    adminPin = strOrNone(adminPin)
+    pin = strOrNone(pin)
+    managementKey = strOrNone(managementKey)
+
+    mgmKey = "010203040506070801020304050607080102030405060708"
+    # TODO: Generate a random 24 byte management key and encode as hex
+    # DEBUG: Disabled while we dev other things
+    # ok, result = Crypto.setMgmKey(current=managementKey, new=mgmtKey)
+    # if not ok:
+    #   print(f"ERROR: Failed to set management key:\n{result}")
+    # else:
+    #   print("Established new management key")
+
+    # TODO: Select random 8 digit pin
+    newAdminPin = "11002200"
+    # DEBUG: Disabled during development
+    # ok, _ = Crypto.setAdminPin(new=newAdminPin, current=adminPin)
+    # if not ok:
+    #   exit(1)
+    # else:
+    #   print("Established new admin pin")
+
+    # TODO: Select random 6 digit pin
+    newPin = "123456"
+    # DEBUG: Disabled during development
+    # ok, _ = Crypto.setPin(newPin, pin)
+    # if not ok:
+    #   exit(1)
+    # else:
+    # print("Established new user PIN")
+
+      
 
   def split(self, k, n, length=128, pubkeydir=".", outdir="./bundle"):
     """
@@ -65,7 +113,7 @@ class Cli:
 
     # Write the manifest file
     print(manifest)
-    with open(f"{outdir}/{MANIFEST}", 'wt') as f:
+    with open(f"{outdir}/{SECRET_SHARE_MANIFEST}", 'wt') as f:
       f.write(jsonEnc(manifest))
 
   def recover(self, bundle_dir):
@@ -73,7 +121,7 @@ class Cli:
     Recover a secret from a bundle of encrypted shares.
     """
     # Load the manifest file.
-    with open(f"{bundle_dir}/{MANIFEST}", 'rt') as f:
+    with open(f"{bundle_dir}/{SECRET_SHARE_MANIFEST}", 'rt') as f:
       manifest = jsonDec(f.read())
 
     # TODO: Verify the manifest contain the expected contents: k, n, etc
@@ -87,7 +135,6 @@ class Cli:
       shares[coeff] = result
 
     # Recover the secret
-    print(shares)
     print(b64enc(Crypto.recoverSecret(shares)))
 
   def genkey(pubkeyfile):
@@ -120,8 +167,10 @@ class Crypto:
   YUBICO_PRIVKEY_SLOT = "9c"
   PKCS15_KEY_NUMBER = "3"
 
-  def __init__(self):
-    pass
+  # Default values for Yubikeys
+  DEFAULT_PIN="123456"
+  DEFAULT_ADMIN_PIN="12345678"
+  DEFAULT_MGMT_KEY="010203040506070801020304050607080102030405060708"
 
   def splitSecret(bits=128, k=3, n=5):
     """
@@ -171,6 +220,57 @@ class Crypto:
 
     return None
 
+  def setAdminPin(new, current=None):
+    """
+    Sets a Yubikey administrative PIN (8 digits) used for unblocking the user 
+    PIN after too many attempts). 
+    If @current is not specified, uses the default admin PIN.
+    """
+    current = current or Crypto.DEFAULT_ADMIN_PIN
+    def checkPin(p):
+      if len(p) != 8:
+        raise ValueError("Admin PIN (PUK) must be 8-digits")
+    checkPin(new)
+    checkPin(current)
+
+    return run(
+      ["yubico-piv-tool", 
+       "--action=change-puk",
+       f"--pin={current}",
+       f"--new-pin={new}"])
+
+  def setPin(new, current=None):
+    """
+    Sets the user PIN (6-digits)
+    """
+    current = current or Crypto.DEFAULT_PIN
+    def checkPin(p):
+      if len(p) != 6:
+        raise ValueError("User PIN must be 6-digits")
+    checkPin(new)
+    checkPin(current)
+
+    return run(
+      ["yubico-piv-tool",
+       "--action=change-pin",
+       f"--pin={current}",
+       f"--new-pin={new}"] )
+    
+  def setMgmKey(new, current=None):
+    """
+    Set the Yubikey management key (used to unblock and reconfigure the device)
+    using the yubico-piv-tool (called via subprocess). If @current is not 
+    specified, uses the default management key.
+    """
+    current = current or Crypto.DEFAULT_MGMT_KEY
+    print(current)
+    return run(
+      ["yubico-piv-tool",
+        f"--key={current}", 
+        "--action=set-mgm-key",
+        f"--new-key={new}"
+        ])
+
   def encrypt(plaintext, pubkeyfile, ctxtfile):
     """
     Encrypts (using OpenSSL called via subprocess) the plaintext 
@@ -184,7 +284,7 @@ class Crypto:
         "-inkey", pubkeyfile,
         "-out", ctxtfile,
       ], 
-      cmdInput=plaintext)
+      inputBytes=plaintext)
     return err
 
   def decrypt(ctxtfile, pin="123456"):
@@ -252,7 +352,7 @@ def getShare(manifest):
 # Encode a bytes object in base64 and return a str object.
 b64enc = lambda x: toStr(urlsafe_b64encode(x))
 
-# Encode a bytes object in base64 and return a str object.
+# Decode a base64 str and return a bytes object.
 b64dec = lambda x: toBytes(urlsafe_b64decode(x))
 
 def toStr(b):
@@ -273,20 +373,44 @@ def toBytes(b):
   else:
     return b
 
-def run(cmd):
+def run(cmd, echo=True, printErrorMsg=True):
   """
   Runs @cmd and captures stdout.
   """
-  result = subprocess.run(cmd, stdout=PIPE)
-  output =result.stdout
-  return (result.returncode == 0, output)
+  cmdString = " ".join(cmd)
+  if echo:
+    print(cmdString)
+  result = subprocess.run(cmd, stdout=PIPE, stderr=PIPE)
+  ok = (result.returncode == 0)
 
-def runWithStdin(cmd, cmdInput):
+  # Handle any errors
+  if ok:
+    output = result.stdout
+  else:
+    output = toStr(result.stderr)
+
+    if printErrorMsg:
+      print(f"Error running command: {cmdString}\n{output}")
+
+  return ok, output
+
+def runWithStdin(cmd, inputString=None, inputBytes=None):
   """
-  Runs @cmd, passes the string @cmdInput to the process, and 
-  returns stdout or any errors.
+  Runs @cmd, passes the string @inputString to the process (or the bytes
+  object @inputBytes).
   @returns (ok, output)
   """
+  # We must have exactly one of inputString, inputBytes set.
+  if not (inputBytes or inputString):
+    raise ValueError("inputString and inputBytes cannot both be None")
+
+  if (inputString and inputBytes):
+    raise ValueError("Only one of inputString and inputBytes can be set")
+
+  # Convert our string to bytes if it was provided
+  if inputString:
+    inputBytes = toBytes(inputString)
+
   proc = subprocess.Popen(
     cmd, 
     stdin=PIPE,
@@ -294,7 +418,7 @@ def runWithStdin(cmd, cmdInput):
     stderr=STDOUT)
 
   # Write the plaintext to STDIN
-  proc.stdin.write(cmdInput)
+  proc.stdin.write(inputBytes)
   proc.stdin.close()
 
   # Wait for openssl to finish
@@ -340,12 +464,9 @@ out         Write the output here; default is a temp file and path is printed
 print       Print the recovered secret to STDOUT and don't write the output to
               a file.
 
-q resplit BUNDLE K N [--pubkeydir DIR [--out PATH]
+q resplit BUNDLE_DIR K N [--pubkeydir DIR [--out PATH]
 Recover and then re-split and re-encrypt a secret.
 """
-# TODO: Establish PIN policy. 
-# Maybe: gen during pubkey creation and store alongside pubkeys.
-# Set mngmt key, PUK, and PIN
 
 # Run!
 if __name__ == '__main__':
