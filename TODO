@@ -1,11 +1,8 @@
 TODO
 
 Enroll a new yubikey
-- enroll cmd
 - Generate random PINs
-- Generate a new pubkey
-- Write pubkey file
-- Write pubkey fp, pubkey filename, MGMT key, PIN, PUK to device manifest
+
 
 - Refactor device insertion code
 

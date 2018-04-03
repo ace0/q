@@ -9,10 +9,10 @@ from hashlib import sha256
 from json import dumps as jsonEnc, loads as jsonDec
 from os.path import exists as pathExists
 from subprocess import PIPE, STDOUT
-from secrets import token_bytes as randomBytes
+from secrets import token_bytes as randomBytes, token_hex as randomHex
 from time import sleep
 
-import subprocess
+import secrets, subprocess, string
 
 import gfshare, fire
 
@@ -43,58 +43,30 @@ class Cli:
         print(msg)
         exit(1)
 
-    adminPin = strOrNone(adminPin)
-    pin = strOrNone(pin)
-    managementKey = strOrNone(managementKey)
-
     # Prompt the operator to insert a device
     Crypto.promptDeviceInsertion()
 
-    newMgmKey = "010203040506070801020304050607080102030405060708"
-    # TODO: Generate a random 24 byte management key and encode as hex
-    # DEBUG: Disabled while we dev other things
-    # print("Setting device management key")
-    # ok, result = Crypto.setMgmKey(current=managementKey, new=newMgmKey)
-    # if not ok:
-    #   print(f"ERROR: Failed to set management key:\n{result}")
-    # else:
-    #   print("Established new management key")
+    # Reset PINs and management keys
+    ok, err, newPin, newAdminPin, newMgmKey = \
+      Crypto.newAccessors(
+        currentOpsPin=strOrNone(pin),
+        currentAdminPin=strOrNone(adminPin),
+        currentMgmKey=strOrNone(managementKey))
+    exitOnFail(ok, err)
 
-    # TODO: Select random 8 digit pin
-    # print("Setting administrative PIN")
-    newAdminPin = "11002200"
-    # DEBUG: Disabled during development
-    # ok, _ = Crypto.setAdminPin(new=newAdminPin, current=adminPin)
-    # if not ok:
-    #   exit(1)
-    # else:
-    #   print("Established new admin pin")
-
-    # TODO: Select random 6 digit pin
-    newPin = "123456"
-    # print("Setting operations PIN")
-    # DEBUG: Disabled during development
-    # ok, _ = Crypto.setPin(newPin, pin)
-    # if not ok:
-    #   exit(1)
-    # else:
-    # print("Established new user PIN")
-
-    # TODO: On failure: we need to emit PIN, MGMTKEY, ADMIN PIN or device
-    #       will be unusable
-
-    # LEFT OFF: Need to generate pubkeyfile name to test this
+    # Generate new keys
+    print("Generating new key pair on device")
     dm = DeviceManifest(bundleDir)
     devNumber, pubkeyfile = dm.newDevice()
     pubkeypath = f"{bundleDir}/{pubkeyfile}"
-    print("Generating new key pair on device")
 
-    ok = Crypto.genPubkeyPair(pubkeypath)
+    ok = Crypto.genPubkeyPair(pubkeypath, managementKey=newMgmKey)
     exitOnFail(ok, "Failed to generate pubkey pair")
 
     ok, fp = Crypto.readPubkeyFingerprint()
     exitOnFail(ok, "Failed to read pubkey fingerprint from device")
 
+    # Update the device manifest 
     dm.addDevice(
       deviceNumber=devNumber, 
       pubkeyFilename=pubkeyfile, 
@@ -103,6 +75,7 @@ class Cli:
       operationsPin=newPin, 
       managementKey=newMgmKey)
     dm.write()
+    print("Manifest updated. Device enrolled.")
 
   def split(self, k, n, length=128, pubkeydir=".", outdir="./bundle"):
     """
@@ -204,6 +177,68 @@ class Crypto:
   DEFAULT_ADMIN_PIN="12345678"
   DEFAULT_MGMT_KEY="010203040506070801020304050607080102030405060708"
 
+  def newAccessors(currentOpsPin=None, currentAdminPin=None, currentMgmKey=None):
+    """
+    Change the operations PIN, admin PIN, and management key on a Yubikey
+    to secure, fresh, random values.
+    @return (ok, errMsg, newOpsPin, newAdminPin, newMgmKey)
+    """
+    newOpsPin, newAdminPin, newMgmKey = (Crypto.randomPin(6), Crypto.randomPin(8), 
+      randomHex(nbytes=24))
+
+    # TODO: Emit the values that WERE set in the case of an error
+    # DEBUG: so we don't brick a device
+    print(newOpsPin, newAdminPin, newMgmKey)
+
+    establishedOpsPin = None
+    establishedAdminPin = None
+    establishedMgmKey = None
+
+    # error = lambda msg: (False, msg, newOpsPin, newAdminPin, newMgmKey)
+
+    try:
+      ok, _ = Crypto.setMgmKey(current=currentMgmKey, new=newMgmKey)
+      if not ok:
+        raise ValueError("Failed to set management key", )
+      establishedMgmKey = newMgmKey
+
+      ok, _ = Crypto.setAdminPin(current=currentAdminPin, new=newAdminPin)
+      if not ok:
+        raise ValueError("Failed to set admin PIN")
+      establishedAdminPin = newAdminPin
+
+      ok, _ = Crypto.setPin(current=currentOpsPin, new=newOpsPin)
+      if not ok:
+        raise ValueError('Failed to set operations PIN (also called "user PIN")')
+      establishedOpsPin = newOpsPin
+
+    except Exception as e:
+      print("An error occurred while attempting to change accessor codes on a Yubikey")
+
+      # Print out any values that were set successfully, but haven't been recorded 
+      # anywhere yet
+      if establishedMgmKey or establishedAdminPin or establishedOpsPin:
+        print("Established the following new values on the device:")
+        if establishedOpsPin:
+          print(f"Operations PIN (user PIN): {establishedOpsPin}")
+
+        if establishedAdminPin:
+          print(f"Admin PIN (PUK): {establishedAdminPin}")
+
+        if establishedMgmKey:
+          print(f"Management key: {establishedMgmKey}")
+
+      return False, str(e), None, None, None
+
+
+    return True, None, newOpsPin, newAdminPin, newMgmKey
+
+  def randomPin(length):
+    """
+    Generates a (secure) random PIN of a given length.
+    """
+    return ''.join(secrets.choice(string.digits) for i in range(length))
+
   def splitSecret(bits=128, k=3, n=5):
     """
     Generate a new secret and split into shares
@@ -254,19 +289,19 @@ class Crypto:
     # Output didn't match the expected output
     return False, None
 
-
-  def genPubkeyPair(pubkeyfile):
+  def genPubkeyPair(pubkeyfile, managementKey=None):
     """
     Generates a new pubkey pair on a Yubico device using the 
     yubico-piv-tool command (called via subprocess). Privkey is
     stored on the device and pubkey is written to pubkeyfile.
     """
-    # TODO: Change these to long form for ease of maintenance
-    ok, result = run(
-      ["yubico-piv-tool",
+    cmd = ["yubico-piv-tool",
         "--action=generate",
-        f"--slot={Crypto.YUBICO_PRIVKEY_SLOT}"])
+        f"--slot={Crypto.YUBICO_PRIVKEY_SLOT}"]
+    if managementKey is not None:
+      cmd.append(f"--key={managementKey}")
 
+    ok, result = run(cmd)
     if not ok:
       return ok
 
@@ -332,7 +367,6 @@ class Crypto:
     specified, uses the default management key.
     """
     current = current or Crypto.DEFAULT_MGMT_KEY
-    print(current)
     return run(
       ["yubico-piv-tool",
         f"--key={current}", 

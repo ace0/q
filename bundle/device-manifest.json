@@ -1,0 +1,26 @@
+{  
+  "1":{  
+    "number":1,
+    "pubkeyFilename":"device-1.pubkey",
+    "pubkeyFingerprint":"e5569eadbf27e1b41e42ef5e92bcaf34ff04873212bbbb7448e96140c58ea0e1",
+    "operationsPin":"685828",
+    "adminPin":"51090512",
+    "managementKey":"f2865f98132a1b93829919d2e54562a9ca39c5676412ab27"
+  },
+  "2":{  
+    "number":2,
+    "pubkeyFilename":"device-2.pubkey",
+    "pubkeyFingerprint":"e5569eadbf27e1b41e42ef5e92bcaf34ff04873212bbbb7448e96140c58ea0e1",
+    "operationsPin":"685828",
+    "adminPin":"51090512",
+    "managementKey":"f2865f98132a1b93829919d2e54562a9ca39c5676412ab27"
+  },
+  "3":{  
+    "number":3,
+    "pubkeyFilename":"device-3.pubkey",
+    "pubkeyFingerprint":"e5569eadbf27e1b41e42ef5e92bcaf34ff04873212bbbb7448e96140c58ea0e1",
+    "operationsPin":"685828",
+    "adminPin":"51090512",
+    "managementKey":"f2865f98132a1b93829919d2e54562a9ca39c5676412ab27"
+  }
+}
