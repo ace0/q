@@ -7,6 +7,7 @@ from collections import namedtuple
 from glob import glob
 from hashlib import sha256
 from json import dumps as jsonEnc, loads as jsonDec
+from os.path import exists as pathExists
 from subprocess import PIPE, STDOUT
 from secrets import token_bytes as randomBytes
 from time import sleep
@@ -14,10 +15,6 @@ from time import sleep
 import subprocess
 
 import gfshare, fire
-
-secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShareFile")
-SECRET_SHARE_MANIFEST = "shares-manifest.json"
-DEVICE_MANIFEST = "device-manifest.json"
 
 class Cli:
   """
@@ -40,6 +37,12 @@ class Cli:
       else:
         return x
 
+    # Bail out on critical errors
+    def exitOnFail(status, msg):
+      if not status:
+        print(msg)
+        exit(1)
+
     adminPin = strOrNone(adminPin)
     pin = strOrNone(pin)
     managementKey = strOrNone(managementKey)
@@ -47,11 +50,11 @@ class Cli:
     # Prompt the operator to insert a device
     Crypto.promptDeviceInsertion()
 
-    mgmKey = "010203040506070801020304050607080102030405060708"
+    newMgmKey = "010203040506070801020304050607080102030405060708"
     # TODO: Generate a random 24 byte management key and encode as hex
     # DEBUG: Disabled while we dev other things
     # print("Setting device management key")
-    # ok, result = Crypto.setMgmKey(current=managementKey, new=mgmtKey)
+    # ok, result = Crypto.setMgmKey(current=managementKey, new=newMgmKey)
     # if not ok:
     #   print(f"ERROR: Failed to set management key:\n{result}")
     # else:
@@ -81,17 +84,25 @@ class Cli:
     #       will be unusable
 
     # LEFT OFF: Need to generate pubkeyfile name to test this
-    pubkeyfile = f"{bundleDir}/Test-device.pubkey"
+    dm = DeviceManifest(bundleDir)
+    devNumber, pubkeyfile = dm.newDevice()
+    pubkeypath = f"{bundleDir}/{pubkeyfile}"
     print("Generating new key pair on device")
-    ok = Crypto.genPubkeyPair(pubkeyfile)
-    if not ok:
-      print("Failed to generate pubkey pair")
-      exit(1)
 
-    # TODO: Write particulars to a manifest file
-    # Should we ditch the current fingerprint method and switch the 
-    # fingerprint shown in yubic-piv-tool --action=status ?
-    # Seems cleaner
+    ok = Crypto.genPubkeyPair(pubkeypath)
+    exitOnFail(ok, "Failed to generate pubkey pair")
+
+    ok, fp = Crypto.readPubkeyFingerprint()
+    exitOnFail(ok, "Failed to read pubkey fingerprint from device")
+
+    dm.addDevice(
+      deviceNumber=devNumber, 
+      pubkeyFilename=pubkeyfile, 
+      pubkeyFingerprint=fp, 
+      adminPin=newAdminPin, 
+      operationsPin=newPin, 
+      managementKey=newMgmKey)
+    dm.write()
 
   def split(self, k, n, length=128, pubkeydir=".", outdir="./bundle"):
     """
@@ -125,6 +136,10 @@ class Cli:
         pubkeyfile=pkfile, 
         ctxtfile=f"{outdir}/{sharefile}")
 
+      # TODO: Index shares by fingerprint
+      #  But for development, we use device number because we're
+      #  using only one device as a proxy for several
+
       # Stores these detes into the manifest
       fp = Crypto.fingerprintFile(pkfile)
       manifest[fp] = secretShareEntry(
@@ -132,17 +147,14 @@ class Cli:
         encryptedShareFile=sharefile)
 
     # Write the manifest file
-    print(manifest)
-    with open(f"{outdir}/{SECRET_SHARE_MANIFEST}", 'wt') as f:
-      f.write(jsonEnc(manifest))
+    writeManifest(f"{outdir}/{SECRET_SHARE_MANIFEST}", manifest)
 
   def recover(self, bundle_dir):
     """
     Recover a secret from a bundle of encrypted shares.
     """
     # Load the manifest file.
-    with open(f"{bundle_dir}/{SECRET_SHARE_MANIFEST}", 'rt') as f:
-      manifest = jsonDec(f.read())
+    manifest = readManifest(f"{bundle_dir}/{SECRET_SHARE_MANIFEST}")
 
     # TODO: Verify the manifest contain the expected contents: k, n, etc
     k = manifest["K"]
@@ -216,6 +228,32 @@ class Crypto:
     return run(
       ["pkcs15-tool", 
        "--read-public-key", Crypto.PKCS15_KEY_NUMBER])
+
+  def readPubkeyFingerprint():
+    """
+    Reads the pubkey fingerprint from a fixed slot of a Yubikey device.
+    """
+    ok, result = run(
+      ["yubico-piv-tool", 
+       "--action=status"
+      ])
+    if not ok:
+      return ok, result
+
+    # Parse the status output and find the fingerprint for slot 9d
+    slotFound = False    
+    for line in result.decode().split("\n"):
+      line = line.strip()
+      if line.startswith(f"Slot {Crypto.YUBICO_PRIVKEY_SLOT}"):
+        slotFound = True
+
+      if slotFound and line.startswith("Fingerprint:"):
+        fp = line.split(":")[1].strip()
+        return True, fp
+
+    # Output didn't match the expected output
+    return False, None
+
 
   def genPubkeyPair(pubkeyfile):
     """
@@ -336,13 +374,79 @@ class Crypto:
     """
     blocksize = 65536
     with open(filename, 'rb') as f:
-      return tb64enc(sha256(f.read()).digest())
+      return b64enc(sha256(f.read()).digest())
 
   def fingerprint(datum):
     """
     Generates base64 encoded fingerprint using SHA256 over in-memory value.
     """
     return b64enc(sha256(toBytes(datum)).digest())
+
+class ManifestBase:
+  """
+  Common routines for managing manifest files
+  """
+  def write(self):
+    """
+    Writes a dictionary to a file in JSON format.
+    """
+    with open(self.path, 'wt') as f:
+      f.write(jsonEnc(self.manifest))
+
+  def _readManifest(self, path):
+    """
+    Reads and decodes a JSON manifest file.
+    """
+    with open(path, 'rt') as f:
+      return jsonDec(f.read())
+
+class DeviceManifest(ManifestBase):
+  """
+  Stores info about individual devices (Yubikeys) managed by Q.
+  """
+  MANIFEST_FILENAME = "device-manifest.json"
+  PUBKEY_BASENAME = "device-{number}.pubkey"
+
+  def __init__(self, dir):
+    self.path = f"{dir}/{self.MANIFEST_FILENAME}"
+
+    # Read the manifest if there is one
+    if pathExists(self.path):
+      self.manifest = self._readManifest(self.path)
+    else:
+      self.manifest = {}
+
+  def newDevice(self):
+    """
+    Generates a unique device number and pubkey filename for a new device.
+    """
+    dn = self._findUnusedDeviceNumber()
+    pubkeyFilename = self.PUBKEY_BASENAME.format(number=dn)
+    return dn, pubkeyFilename
+
+  def addDevice(self, deviceNumber, pubkeyFilename, pubkeyFingerprint, 
+    adminPin, operationsPin, managementKey):
+    """
+    Adds a new device to this manifest and re-writes the file.
+    @returns pubkeyfilename
+    """
+    # TODO: Index these by device fingerprint to avoid duplicate devices
+    #       and enable faster lookup
+    #  But for debug we want to use the same yubikey mutiple times.
+    self.manifest[deviceNumber] = {
+        "number": deviceNumber,
+        "pubkeyFilename": pubkeyFilename,
+        "pubkeyFingerprint": pubkeyFingerprint,
+        "operationsPin": operationsPin,
+        "adminPin": adminPin,
+        "managementKey": managementKey
+      }
+
+  def _findUnusedDeviceNumber(self):
+    if len(self.manifest) == 0:
+      return 1
+    else:
+      return max([int(d["number"]) for d in self.manifest.values()])+1
 
 def identifyShares(manifest, k):
   """
@@ -380,11 +484,17 @@ def getShare(manifest):
       del manifest[k]
       return v
 
-# Encode a bytes object in base64 and return a str object.
-b64enc = lambda x: toStr(urlsafe_b64encode(x))
+def b64enc(x): 
+  """
+  Encode a bytes object in base64 and return a str object.
+  """
+  return toStr(urlsafe_b64encode(x))
 
-# Decode a base64 str and return a bytes object.
-b64dec = lambda x: toBytes(urlsafe_b64decode(x))
+def b64dec(x): 
+  """
+  Decode a base64 str and return a bytes object.
+  """
+  return toBytes(urlsafe_b64decode(x))
 
 def toStr(b):
   """
@@ -461,6 +571,13 @@ def runWithStdin(cmd, inputString=None, inputBytes=None):
   proc.stdout.close()
 
   return (proc.returncode == 0, output)
+
+# Constants
+
+secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShareFile")
+deviceManifestEntry = namedtuple("deviceManifestEntry", 
+  "pubkeyfile pubkeyFingerpint mgmKey puk pin")
+SECRET_SHARE_MANIFEST = "shares-manifest.json"
 
 usage = \
 """
