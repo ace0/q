@@ -7,14 +7,15 @@ from collections import namedtuple
 from glob import glob
 from hashlib import sha256
 from json import dumps as jsonEnc, loads as jsonDec
-from os.path import exists as pathExists
 from subprocess import PIPE, STDOUT
 from secrets import token_bytes as randomBytes, token_hex as randomHex
 from time import sleep
 
-import secrets, subprocess, string
+import os, secrets, subprocess, string
 
 import gfshare, fire
+
+from lib import *
 
 class Cli:
   """
@@ -77,50 +78,58 @@ class Cli:
     dm.write()
     print("Manifest updated. Device enrolled.")
 
-  def split(self, k, n, length=128, pubkeydir=".", outdir="./bundle"):
+  def split(self, k, n, length=128, bundleDir="./bundle"):
     """
     Generate a new secret, split it into shares, encrypt them, and write 
     them in a bundle to a file.
     """
-    # TODO: Add extension option, ext=.pubkey
+    def fatal(msg):
+      if msg:
+        print(msg)
+      exit(1)
+
     # Verify cmd line arguments
     k, n = int(k), int(n)
-    pubkeyfiles = glob(f"{pubkeydir}/*.pubkey")
-    if n != len(pubkeyfiles):
-      print(f"ERROR: The total number of shares, N, must match the number of "
-        "pubkey files. Instead found N={n}, number of pubkeyfiles="
+
+    if k > n:
+      fatal(f"ERROR: K=({k}) cannot be larger than N(={n})")
+
+    devices = DeviceManifest(bundleDir).devices()
+    if n != len(devices):
+      fatal(f"ERROR: The total number of shares, N, must match the number of "
+        "public keys enrolled. Instead found N={n}, number of pubkeys="
         "{len(pubkeyfiles)}")
-      exit(1)
 
     shares = Crypto.splitSecret(bits=length, k=k, n=n)
 
-    # Maps pubkey fingerprint => (coefficient, encryptedShare)
-    manifest = { "K": k, "N": n}
+    # Store information about each encrypted share
+    shareManifest = ShareManifest.new(dir=bundleDir, k=k, n=n)
 
-    # LEFT OFF: Implementing encryption of individual shares
+    # Remove any existing sharefiles in the directory
+    purgeSharefiles(bundleDir)
+
     # Encrypt each share under a distinct pubkey
-    for (pkfile, (coeff, share)) in zip(pubkeyfiles, shares.items()):
-      print(f"{pkfile} {coeff} {share}")
+    for (device, (coeff, share)) in zip(devices, shares.items()):
+      # Grab the pubkey filename independent of the directory
+      pubkeyFilename = device["pubkeyFilename"]
 
       # Encrypt the share and write it to a file
       sharefile = f"share-{coeff}.ctxt"
-      Crypto.encrypt(
+      ok = Crypto.encrypt(
         plaintext=share,
-        pubkeyfile=pkfile, 
-        ctxtfile=f"{outdir}/{sharefile}")
+        pubkeyfile=f"{bundleDir}/{pubkeyFilename}", 
+        ctxtfile=f"{bundleDir}/{sharefile}")
+      if not ok:
+        fatal()
 
-      # TODO: Index shares by fingerprint
-      #  But for development, we use device number because we're
-      #  using only one device as a proxy for several
+      shareManifest.addShare(
+        coeff=coeff,
+        encryptedShareFile=sharefile,
+        pubkeyFilename=device["pubkeyFilename"],
+        pubkeyFingerprint=device["pubkeyFingerprint"])
 
-      # Stores these detes into the manifest
-      fp = Crypto.fingerprintFile(pkfile)
-      manifest[fp] = secretShareEntry(
-        coeff=coeff, 
-        encryptedShareFile=sharefile)
-
-    # Write the manifest file
-    writeManifest(f"{outdir}/{SECRET_SHARE_MANIFEST}", manifest)
+    # Write the share manifest file
+    shareManifest.write()
 
   def recover(self, bundle_dir):
     """
@@ -186,8 +195,7 @@ class Crypto:
     newOpsPin, newAdminPin, newMgmKey = (Crypto.randomPin(6), Crypto.randomPin(8), 
       randomHex(nbytes=24))
 
-    # TODO: Emit the values that WERE set in the case of an error
-    # DEBUG: so we don't brick a device
+    # DEBUG: Here for development
     print(newOpsPin, newAdminPin, newMgmKey)
 
     establishedOpsPin = None
@@ -380,7 +388,7 @@ class Crypto:
     using a pubkey read from a file. The resulting ciphertext is 
     written to ctxfile.
     """
-    _, err = runWithStdin(
+    ok, _ = runWithStdin(
       cmd=["openssl", 
         "pkeyutl", "-encrypt",
         "-pubin",
@@ -388,7 +396,7 @@ class Crypto:
         "-out", ctxtfile,
       ], 
       inputBytes=plaintext)
-    return err
+    return ok
 
   def decrypt(ctxtfile, pin="123456"):
     return run(
@@ -416,71 +424,12 @@ class Crypto:
     """
     return b64enc(sha256(toBytes(datum)).digest())
 
-class ManifestBase:
+def purgeSharefiles(dir):
   """
-  Common routines for managing manifest files
+  Remove any encrypted share files from a directory.
   """
-  def write(self):
-    """
-    Writes a dictionary to a file in JSON format.
-    """
-    with open(self.path, 'wt') as f:
-      f.write(jsonEnc(self.manifest))
-
-  def _readManifest(self, path):
-    """
-    Reads and decodes a JSON manifest file.
-    """
-    with open(path, 'rt') as f:
-      return jsonDec(f.read())
-
-class DeviceManifest(ManifestBase):
-  """
-  Stores info about individual devices (Yubikeys) managed by Q.
-  """
-  MANIFEST_FILENAME = "device-manifest.json"
-  PUBKEY_BASENAME = "device-{number}.pubkey"
-
-  def __init__(self, dir):
-    self.path = f"{dir}/{self.MANIFEST_FILENAME}"
-
-    # Read the manifest if there is one
-    if pathExists(self.path):
-      self.manifest = self._readManifest(self.path)
-    else:
-      self.manifest = {}
-
-  def newDevice(self):
-    """
-    Generates a unique device number and pubkey filename for a new device.
-    """
-    dn = self._findUnusedDeviceNumber()
-    pubkeyFilename = self.PUBKEY_BASENAME.format(number=dn)
-    return dn, pubkeyFilename
-
-  def addDevice(self, deviceNumber, pubkeyFilename, pubkeyFingerprint, 
-    adminPin, operationsPin, managementKey):
-    """
-    Adds a new device to this manifest and re-writes the file.
-    @returns pubkeyfilename
-    """
-    # TODO: Index these by device fingerprint to avoid duplicate devices
-    #       and enable faster lookup
-    #  But for debug we want to use the same yubikey mutiple times.
-    self.manifest[deviceNumber] = {
-        "number": deviceNumber,
-        "pubkeyFilename": pubkeyFilename,
-        "pubkeyFingerprint": pubkeyFingerprint,
-        "operationsPin": operationsPin,
-        "adminPin": adminPin,
-        "managementKey": managementKey
-      }
-
-  def _findUnusedDeviceNumber(self):
-    if len(self.manifest) == 0:
-      return 1
-    else:
-      return max([int(d["number"]) for d in self.manifest.values()])+1
+  for file in glob(f"{dir}/share-*.ctxt"):
+    os.remove(file)
 
 def identifyShares(manifest, k):
   """
@@ -569,7 +518,7 @@ def run(cmd, echo=False, printErrorMsg=True):
 
   return ok, output
 
-def runWithStdin(cmd, inputString=None, inputBytes=None):
+def runWithStdin(cmd, inputString=None, inputBytes=None, printErrorMsg=True):
   """
   Runs @cmd, passes the string @inputString to the process (or the bytes
   object @inputBytes).
@@ -601,17 +550,23 @@ def runWithStdin(cmd, inputString=None, inputBytes=None):
     proc.poll()
     sleep(1)
 
+  # Read and close stdout
   output = proc.stdout.read()
   proc.stdout.close()
 
-  return (proc.returncode == 0, output)
+  # Handle any errors
+  ok = proc.returncode == 0
+  if not ok and printErrorMsg:
+    cmdString = " ".join(cmd)
+    print(f"Error running command: {cmdString}\n{toStr(output)}")
+
+  return ok, output
 
 # Constants
 
 secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShareFile")
 deviceManifestEntry = namedtuple("deviceManifestEntry", 
   "pubkeyfile pubkeyFingerpint mgmKey puk pin")
-SECRET_SHARE_MANIFEST = "shares-manifest.json"
 
 usage = \
 """
