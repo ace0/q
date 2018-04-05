@@ -2,19 +2,11 @@
 Q: a python library and command-line tool for managing a quorum of hardware 
 devices (Yubikeys) required to unlock a secret.
 """
-from base64 import urlsafe_b64encode, urlsafe_b64decode
-from collections import namedtuple
 from glob import glob
 from hashlib import sha256
-from json import dumps as jsonEnc, loads as jsonDec
-from subprocess import PIPE, STDOUT
 from secrets import token_bytes as randomBytes, token_hex as randomHex
-from time import sleep
-
-import os, secrets, subprocess, string
-
+import os, secrets, string
 import gfshare, fire
-
 from lib import *
 
 class Cli:
@@ -150,26 +142,6 @@ class Cli:
 
     # Recover the secret
     print(b64enc(Crypto.recoverSecret(shares)))
-
-  def genkey(pubkeyfile):
-    err = Crypto.genPubkeyPair(pubkeyfile)
-    if err:
-      print(f"ERROR: {err}")
-
-  def encrypt(self, pubkeyfile, ctxtfile):
-    err = Crypto.encrypt(
-      plaintext="hello, world", 
-      pubkeyfile=pubkeyfile, 
-      ctxtfile=ctxtfile)
-    if err:
-      print(f"ERROR: {err}")
-
-  def decrypt(self, ctxtfile):
-    ok, result = Crypto.decrypt(ctxtfile)
-    if ok:
-      print(f"Recovered: '{result}'")
-    else:
-      print(f"ERROR: {result}")
 
 class Crypto:
   """
@@ -467,107 +439,6 @@ def getShare(manifest):
       del manifest[k]
       return v
 
-def b64enc(x): 
-  """
-  Encode a bytes object in base64 and return a str object.
-  """
-  return toStr(urlsafe_b64encode(x))
-
-def b64dec(x): 
-  """
-  Decode a base64 str and return a bytes object.
-  """
-  return toBytes(urlsafe_b64decode(x))
-
-def toStr(b):
-  """
-  Converts a utf-8 bytes object to a string.
-  """
-  if type(b) == str:
-    return b
-  else:
-    return b.decode("utf-8")
-
-def toBytes(b):
-  """
-  Converts a string to a bytes object by encoding it as utf-8.
-  """
-  if type(b) == str:
-    return b.encode("utf-8")
-  else:
-    return b
-
-def run(cmd, echo=False, printErrorMsg=True):
-  """
-  Runs @cmd and captures stdout.
-  """
-  cmdString = " ".join(cmd)
-  if echo:
-    print(cmdString)
-  result = subprocess.run(cmd, stdout=PIPE, stderr=PIPE)
-  ok = (result.returncode == 0)
-
-  # Handle any errors
-  if ok:
-    output = result.stdout
-  else:
-    output = toStr(result.stderr)
-
-    if printErrorMsg:
-      print(f"Error running command: {cmdString}\n{output}")
-
-  return ok, output
-
-def runWithStdin(cmd, inputString=None, inputBytes=None, printErrorMsg=True):
-  """
-  Runs @cmd, passes the string @inputString to the process (or the bytes
-  object @inputBytes).
-  @returns (ok, output)
-  """
-  # We must have exactly one of inputString, inputBytes set.
-  if not (inputBytes or inputString):
-    raise ValueError("inputString and inputBytes cannot both be None")
-
-  if (inputString and inputBytes):
-    raise ValueError("Only one of inputString and inputBytes can be set")
-
-  # Convert our string to bytes if it was provided
-  if inputString:
-    inputBytes = toBytes(inputString)
-
-  proc = subprocess.Popen(
-    cmd, 
-    stdin=PIPE,
-    stdout=PIPE, 
-    stderr=STDOUT)
-
-  # Write the plaintext to STDIN
-  proc.stdin.write(inputBytes)
-  proc.stdin.close()
-
-  # Wait for openssl to finish
-  while proc.returncode is None:
-    proc.poll()
-    sleep(1)
-
-  # Read and close stdout
-  output = proc.stdout.read()
-  proc.stdout.close()
-
-  # Handle any errors
-  ok = proc.returncode == 0
-  if not ok and printErrorMsg:
-    cmdString = " ".join(cmd)
-    print(f"Error running command: {cmdString}\n{toStr(output)}")
-
-  return ok, output
-
-# Constants
-
-secretShareEntry = namedtuple("secretShareEntry", "coeff encryptedShareFile")
-deviceManifestEntry = namedtuple("deviceManifestEntry", 
-  "pubkeyfile pubkeyFingerpint mgmKey puk pin")
-
 usage = \
 """
 q COMMAND [OPTIONS]
@@ -585,23 +456,21 @@ keys.
 K          K (decrypted) shares represents a quorom and can be used to recover 
             the secret (2 or 3 is a common setting).
 N          N shares are created (N must be larger or equal to K).
-keysize    The size of the new secret in bits; default=128.
-pubkeydir  Public keys for encrypting the keyshares are found in this 
-            directory; default=./
-output     Write the encrypted bundle of shares to this location; 
-            default=./quorum-secret
+length     The size of the new secret in bits; default=128.
+bundleDir  Directory that stores device and pubkey information; output written
+           here as well; default=./bundle
 
-q recover BUNDLE_DIR [--out PATH] [--print]
+q recover [--bundleDir DIR] [--out PATH] [--print]
 Recover a secret from the encrypted bundle. Prompt for individual 
 hardware devices to be inserted.
 
-BUNDLE_DIR  The bundle of encrypted shares in a directory.
-out         Write the output here; default is a temp file and path is printed
-              to STDERR.
+bundleDir   Directory containing encrypted shares and device information.
+out         Write the recovered secret here; default is a temp file and path is printed
+              to STDOUT.
 print       Print the recovered secret to STDOUT and don't write the output to
               a file.
 
-q resplit BUNDLE_DIR K N [--pubkeydir DIR [--out PATH]
+q resplit K N [--pubkeydir DIR [--out PATH] [--bundleDir DIR]
 Recover and then re-split and re-encrypt a secret.
 """
 
