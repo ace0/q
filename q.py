@@ -4,10 +4,12 @@ devices (Yubikeys) required to unlock a secret.
 """
 from glob import glob
 from hashlib import sha256
-from secrets import token_bytes as randomBytes, token_hex as randomHex
+from secrets import token_bytes, token_hex as randomHex
 import os, secrets, string
 import gfshare, fire
 from lib import *
+
+DEFAULT_BUNDLE_DIR = "./bundle"
 
 class Cli:
   """
@@ -16,7 +18,7 @@ class Cli:
   def __init__(self):
     pass
 
-  def enroll(self, bundleDir="./bundle", adminPin=None, pin=None, 
+  def enroll(self, bundleDir=DEFAULT_BUNDLE_DIR, adminPin=None, pin=None, 
     managementKey=None):
     """
     Enrolls a new Yubikey device for secrets management. 
@@ -29,12 +31,6 @@ class Cli:
         return str(x)
       else:
         return x
-
-    # Bail out on critical errors
-    def exitOnFail(status, msg):
-      if not status:
-        print(msg)
-        exit(1)
 
     # Prompt the operator to insert a device
     Crypto.promptDeviceInsertion()
@@ -70,32 +66,25 @@ class Cli:
     dm.write()
     print("Manifest updated. Device enrolled.")
 
-  def split(self, k, n, length=128, bundleDir="./bundle"):
+  def split(self, k, n, length=128, bundleDir=DEFAULT_BUNDLE_DIR):
     """
     Generate a new secret, split it into shares, encrypt them, and write 
     them in a bundle to a file.
     """
-    def fatal(msg):
-      if msg:
-        print(msg)
-      exit(1)
-
     # Verify cmd line arguments
     k, n = int(k), int(n)
-
-    if k > n:
-      fatal(f"ERROR: K=({k}) cannot be larger than N(={n})")
+    exitOnFail(k <= n, f"ERROR: K=({k}) cannot be larger than N(={n})")
 
     devices = DeviceManifest(bundleDir).devices()
-    if n != len(devices):
-      fatal(f"ERROR: The total number of shares, N, must match the number of "
-        "public keys enrolled. Instead found N={n}, number of pubkeys="
-        "{len(pubkeyfiles)}")
+    exitOnFail(n == len(devices), 
+      f"ERROR: The total number of shares, N, must match the number of "
+      "public keys enrolled. Instead found N={n}, number of pubkeys="
+      "{len(pubkeyfiles)}")
 
     shares = Crypto.splitSecret(bits=length, k=k, n=n)
 
     # Store information about each encrypted share
-    shareManifest = ShareManifest.new(dir=bundleDir, k=k, n=n)
+    shareManifest = ShareManifest.new(directory=bundleDir, k=k, n=n)
 
     # Remove any existing sharefiles in the directory
     purgeSharefiles(bundleDir)
@@ -111,8 +100,7 @@ class Cli:
         plaintext=share,
         pubkeyfile=f"{bundleDir}/{pubkeyFilename}", 
         ctxtfile=f"{bundleDir}/{sharefile}")
-      if not ok:
-        fatal()
+      exitOnFail(ok)
 
       shareManifest.addShare(
         coeff=coeff,
@@ -123,21 +111,21 @@ class Cli:
     # Write the share manifest file
     shareManifest.write()
 
-  def recover(self, bundle_dir):
+  def recover(self, bundleDir=DEFAULT_BUNDLE_DIR):
     """
     Recover a secret from a bundle of encrypted shares.
     """
     # Load the manifest file.
-    manifest = readManifest(f"{bundle_dir}/{SECRET_SHARE_MANIFEST}")
+    manifest = ShareManifest.load(bundleDir)
 
     # TODO: Verify the manifest contain the expected contents: k, n, etc
-    k = manifest["K"]
     shares = {}
-    for coeff, sharefile in identifyShares(manifest, k):
-      ok, result = Crypto.decrypt(f"{bundle_dir}/{sharefile}")
-      if not ok:
-        print("ERROR: Decryption of {bundle_dir}/{sharefile} failed: {result}")
-        exit(1)
+    shareMatcher = identifyShares(
+      sharesTable=manifest.shares, 
+      k=manifest.k)
+    for coeff, sharefile in shareMatcher:
+      ok, result = Crypto.decrypt(f"{bundleDir}/{sharefile}")
+      exitOnFail(ok)
       shares[coeff] = result
 
     # Recover the secret
@@ -227,8 +215,18 @@ class Crypto:
       raise ValueError(f"Quorum K cannot be larger than total number "
         "of shares N. Instead found K={k} and N={n}")
 
-    secret = randomBytes(nbytes=int(bits/8))
-    return gfshare.split(k, n, bytes(secret))
+    secret = Crypto.randomBytes(bits=bits, noNullBytes=True)
+    return gfshare.split(k, n, secret)
+
+  def randomBytes(bits, noNullBytes):
+    """
+    Securely generates a fresh, random value. Ensures that value
+    has no null bytes, if requested.
+    """
+    while True:
+      value = token_bytes(nbytes=int(bits/8))
+      if 0 not in value:
+        return bytes(value)
 
   def recoverSecret(shares):
     """
@@ -403,41 +401,65 @@ def purgeSharefiles(dir):
   for file in glob(f"{dir}/share-*.ctxt"):
     os.remove(file)
 
-def identifyShares(manifest, k):
+def identifyShares(sharesTable, k):
   """
   Prompts the user to insert a Yubikey, identify the device by it's pubkey 
-  fingerprint and match that against a manifest entry. Continues until it
+  fingerprint and match that against a shareManifest entry. Continues until it
   recovers k shares.
   @yields: (coeff, sharefile)
   """
+  # Returns each sharefile in turn
+  def getShareDebug(sharesTable):
+    for _,entry in sharesTable.items():
+      print("entry", entry)
+      yield entry["coeff"], entry["sharefile"]
+
   for i in range(k):
     ok = False
     while not ok:
-      input(f"Insert Yubikey and press <enter> [{i+1} of {k}]:")
-      ok, pubkey = Crypto.readPubkey()
+      coeff, shares = matchYubikey(
+        sharesTable=sharesTable,
+        prompt=f"Insert Yubikey and press enter [{i}/{k}]: ")
 
-      if not ok:
-        continue
+      # HACK: Instead of using the coeff,shares above; we use
+      #       each sharefile in turn because we're developing with 
+      #       a single yubikey.
+      # yield coeff, shares
+      yield from getShareDebug(sharesTable)
 
-      # TODO: Check pubkey against the manifest
-      fp = Crypto.fingerprint(pubkey)
-      # if not fp in manifest:
-      #    print("Cannot find this pubkey in the manifest")
-      #    continue
-      # print(f"Located pubkey {fp} in manifest")
+def matchYubikey(sharesTable, prompt):
+  """
+  Prompts for a device to be inserted and ensures that device matches
+  some device associated with an encrypted sharefile by matching against
+  the pubkeyfingerprint. 
+  Continues prompting until a yubikey is inserted that matches some entry
+  in the shares manifest
+  """
+  while True:
+    # Read the pubkey fingerprint for the inserted device
+    Crypto.promptDeviceInsertion(msg=prompt)
+    ok, pkfp = Crypto.readPubkeyFingerprint()
 
-      # HACK: because we have only one yubikey for development
-      coeff, sharefile = getShare(manifest)
-      # coeff, sharefile = manifest[fp]
-      print(f"{coeff}: {sharefile}")
-      yield coeff, sharefile
+    if not ok:
+      raise RuntimeError("Failed to read pubkey fingerprint")
 
-# HACK: because we have only one yubikey for development
-def getShare(manifest):
-  for k,v in manifest.items():
-    if k != "K" and k != "N":
-      del manifest[k]
-      return v
+    # Find the right sharefile for this key
+
+    # TODO: When we index shares by pubkey fingerprint this is 
+    #       much simpler
+    # if pkfp not in shareManifest["shares"]:
+    for key, entry in sharesTable.items():
+      if entry["pubkeyFingerprint"] == pkfp:
+        return entry["coeff"], entry["encryptedShareFile"]
+
+    print("This device doesn't match any shares")
+
+def exitOnFail(ok, msg=None):
+  if not ok and msg:
+    print(msg)
+  if not ok:
+    exit(1)
+
 
 usage = \
 """

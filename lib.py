@@ -2,66 +2,78 @@
 Common routines
 """
 from base64 import urlsafe_b64encode, urlsafe_b64decode
-# from collections import namedtuple
-# from glob import glob
-# from hashlib import sha256
 from json import dumps as jsonEnc, loads as jsonDec
-from subprocess import PIPE, STDOUT
-# from secrets import token_bytes as randomBytes, token_hex as randomHex
 from time import sleep
-
 from os.path import exists as pathExists
-
-# import secrets, subprocess, string
+from subprocess import PIPE, STDOUT
 import subprocess
-
 
 ##
 # Manage manifest files
 
-class ManifestBase:
+class JsonSerializable:
   """
-  Common routines for managing manifest files
+  Classes that can be (de)serialized (from) to JSON.
   """
+  def _getDict(self):
+    """
+    Subclasses implement this to retrieve a dictionary that will be serialized
+    to JSON.
+    """
+    pass
+
   def write(self):
     """
     Writes a dictionary to a file in JSON format.
     """
     with open(self.path, 'wt') as f:
-      f.write(jsonEnc(self.manifest))
+      f.write(jsonEnc(self._getDict(), sort_keys=True, indent=3))
 
-  def _readManifest(self, path):
+  def _readJson(self):
     """
-    Reads and decodes a JSON manifest file.
+    Reads and decodes a JSON file.
     """
-    with open(path, 'rt') as f:
+    with open(self.path, 'rt') as f:
       return jsonDec(f.read())
 
-class ShareManifest(ManifestBase):
+class ShareManifest(JsonSerializable):
   """
   Stores information about encrypted share files so that they can be
   reconstructed.
   """
-  MANIFEST_FILENAME = "shares-manifest.json"
+  FILENAME = "shares-manifest.json"
 
-  def new(dir, n, k):
+  def __init__(self, directory):
+    """
+    Creates a new object. Callers should use .new() and .load() to
+    create new manifests or read them from a file, respectively. 
+    """
+    self.path = f"{directory}/{ShareManifest.FILENAME}"
+
+  def new(directory, n, k):
     """
     Creates a new secret share manifest that can be written 
-    to the given directory.
+    to the given directoryectory.
     """
-    m = ShareManifest()
-    m.path = f"{dir}/{ShareManifest.MANIFEST_FILENAME}"
-    m.manifest = {"K": k, "N":n, "shares": {}}
+    m = ShareManifest(directory)
+    m.n = n
+    m.k = k
+    m.shares = {}
     return m
 
-  def load(dir):
+  def load(directory):
     """
     Reads an existing secret share manifest from the specified 
     directory.
     """
-    m = ShareManifest()
-    m.path = f"{dir}/{self.MANIFEST_FILENAME}"
-    m._readManifest(m.path)
+    m = ShareManifest(directory)
+    m.path = f"{directory}/{ShareManifest.FILENAME}"
+
+    # Read the manifest file and store entries as object attributes
+    manifest = m._readJson()
+    m.k = manifest["k"]
+    m.n = manifest["n"]
+    m.shares = manifest["shares"]
     return m
 
   def addShare(self, coeff, encryptedShareFile, 
@@ -71,14 +83,20 @@ class ShareManifest(ManifestBase):
     """
     # TODO: Index shares by pubkey fingerprints
     #  But for development we want to re-use a single device
-    self.manifest["shares"][pubkeyFilename] = {
+    self.shares[pubkeyFilename] = {
       "coeff": coeff, 
       "encryptedShareFile": encryptedShareFile,
       "pubkeyFilename": pubkeyFilename,
       "pubkeyFingerprint": pubkeyFingerprint
       }
 
-class DeviceManifest(ManifestBase):
+  def _getDict(self):
+    return {
+      "k": self.k, 
+      "n": self.n,
+      "shares": self.shares
+      }
+class DeviceManifest(JsonSerializable):
   """
   Stores info about individual devices (Yubikeys) managed by Q.
   """
@@ -90,7 +108,7 @@ class DeviceManifest(ManifestBase):
 
     # Read the manifest if there is one
     if pathExists(self.path):
-      self.manifest = self._readManifest(self.path)
+      self.manifest = self._readJson()
     else:
       self.manifest = {}
 
