@@ -37,20 +37,26 @@ yubico-piv-tool \
                              will be asked for
 
 
-# Current Accessor codes
-adminPin=12345678
-pin=123456
+yubico-piv-tool \
+    --action=generate \
+    --slot=9c \
+    --key=f2865f98132a1b93829919d2e54562a9ca39c5676412ab27 \
+    --algorithm=RSA2048
 
-# I think this one:
-managementKey=e5569eadbf27e1b41e42ef5e92bcaf34ff04873212bbbb7448e96140c58ea0e1
+openssl pkeyutl \
+    -encrypt \
+    -certin -inkey test.pubkeycert \
+    -out test.ctxt 
 
-# Doesn't work
-# 8a8624b751df18da63a6320a388744aac69a3b4c4cfe3f4f
-# a1840153342a5bb99e1c2a4a88329b89623399f4b6d0389c
-# bc65ea914d845246f2b98fd3d29125fb8bc006b89b728813
-# 14e8235cdc4f1190d378dc58477c513bd0cb6a3f899b7929
+pkcs15-crypt --decipher \
+    -i test.ctxt \
+    t -o /dev/stdout \
+    -p 685828 --key 3
 
-export  MGM=4ad18ef0098cb6f6deaff5e5f33dad9bb596614f73f116c9
-DEFAULT_KEY=010203040506070801020304050607080102030405060708
-yubico-piv-tool --key=$MGM --action=set-mgm-key --new-key=$DEFAULT_KEY
+
+
+
+
+
+
 

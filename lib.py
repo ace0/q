@@ -15,7 +15,7 @@ class JsonSerializable:
   """
   Classes that can be (de)serialized (from) to JSON.
   """
-  def _getDict(self):
+  def _getContents(self):
     """
     Subclasses implement this to retrieve a dictionary that will be serialized
     to JSON.
@@ -27,7 +27,7 @@ class JsonSerializable:
     Writes a dictionary to a file in JSON format.
     """
     with open(self.path, 'wt') as f:
-      f.write(jsonEnc(self._getDict(), sort_keys=True, indent=3))
+      f.write(jsonEnc(self._getContents(), sort_keys=True, indent=3))
 
   def _readJson(self):
     """
@@ -90,39 +90,54 @@ class ShareManifest(JsonSerializable):
       "pubkeyFingerprint": pubkeyFingerprint
       }
 
-  def _getDict(self):
+  def _getContents(self):
     return {
       "k": self.k, 
       "n": self.n,
       "shares": self.shares
       }
+
 class DeviceManifest(JsonSerializable):
   """
   Stores info about individual devices (Yubikeys) managed by Q.
   """
-  MANIFEST_FILENAME = "device-manifest.json"
+  FILENAME = "device-manifest.json"
   PUBKEY_BASENAME = "device-{number}.pubkey"
 
-  def __init__(self, dir):
-    self.path = f"{dir}/{self.MANIFEST_FILENAME}"
+  def __init__(self, directory):
+    self.path = f"{directory}/{self.FILENAME}"
 
-    # Read the manifest if there is one
+    # Read the manifest if one exists
     if pathExists(self.path):
-      self.manifest = self._readJson()
+      self.deviceTable = self._readJson()
     else:
-      self.manifest = {}
+      self.deviceTable = {}
+
+  def load(directory):
+    """
+    Load a device manifest file.
+    """
+    return DeviceManifest(directory)
+
+  def findDevice(self, pubkeyFingerprint):
+    """
+    Finds the device entry that matches a pubkeyFingerprint.
+    """
+    for device in self.devices():
+      if device["pubkeyFingerprint"] == pubkeyFingerprint:
+        return device
 
   def devices(self):
     """
     Retrieves a list (of dictionaries) of all devices.
     """
-    return list(self.manifest.values())
+    return list(self.deviceTable.values())
 
   def newDevice(self):
     """
     Generates a unique device number and pubkey filename for a new device.
     """
-    dn = self._findUnusedDeviceNumber()
+    dn = str(self._findUnusedDeviceNumber())
     pubkeyFilename = self.PUBKEY_BASENAME.format(number=dn)
     return dn, pubkeyFilename
 
@@ -135,7 +150,7 @@ class DeviceManifest(JsonSerializable):
     # TODO: Index these by device fingerprint to avoid duplicate devices
     #       and enable faster lookup
     #  But for debug we want to use the same yubikey mutiple times.
-    self.manifest[deviceNumber] = {
+    self.deviceTable[deviceNumber] = {
         "number": deviceNumber,
         "pubkeyFilename": pubkeyFilename,
         "pubkeyFingerprint": pubkeyFingerprint,
@@ -144,11 +159,14 @@ class DeviceManifest(JsonSerializable):
         "managementKey": managementKey
       }
 
+  def _getContents(self):
+    return self.deviceTable
+
   def _findUnusedDeviceNumber(self):
-    if len(self.manifest) == 0:
+    if len(self.deviceTable) == 0:
       return 1
     else:
-      return max([int(d["number"]) for d in self.manifest.values()])+1
+      return max([int(d["number"]) for d in self.deviceTable.values()])+1
 
 ## 
 # Utilities
@@ -183,7 +201,26 @@ def toBytes(b):
   else:
     return b
 
-def run(cmd, echo=False, printErrorMsg=True):
+# TODO: Refactor into a single run()
+#  with optional input and maybe even detect the type and apply
+#  encoding automatically
+# How to guess at the output?
+# Maybe decodeStdout=True which reads stdout as text unless
+#  otherwise specified.
+# def run(cmd, echo, printErrorMsg, ...):
+#  if echo: 
+#    print()
+#  if input:
+#    _runWithStdin
+#  else:
+#    _run()
+# 
+#  if not ok and printErrorMSg()
+#    if not echo:
+#       echoNow()
+#     print(error)
+#  ...
+def run(cmd, echo=True, printErrorMsg=True):
   """
   Runs @cmd and captures stdout.
   """
@@ -204,7 +241,7 @@ def run(cmd, echo=False, printErrorMsg=True):
 
   return ok, output
 
-def runWithStdin(cmd, inputString=None, inputBytes=None, printErrorMsg=True):
+def runWithStdin(cmd, echo=True, inputString=None, inputBytes=None, printErrorMsg=True):
   """
   Runs @cmd, passes the string @inputString to the process (or the bytes
   object @inputBytes).
@@ -216,6 +253,9 @@ def runWithStdin(cmd, inputString=None, inputBytes=None, printErrorMsg=True):
 
   if (inputString and inputBytes):
     raise ValueError("Only one of inputString and inputBytes can be set")
+
+  if echo:
+    print(" ".join(cmd))
 
   # Convert our string to bytes if it was provided
   if inputString:
@@ -247,3 +287,20 @@ def runWithStdin(cmd, inputString=None, inputBytes=None, printErrorMsg=True):
     print(f"Error running command: {cmdString}\n{toStr(output)}")
 
   return ok, output
+
+def exitOnFail(ok, msg=None):
+  if not ok and msg:
+    print(msg)
+  if not ok:
+    exit(1)
+
+def strOrNone(x):
+  """
+  Converts numeric values to strings, but leaves None as None.
+  """
+  if x is None:
+    return None
+  if type(x) == int:
+    return str(x)
+  else:
+    return x

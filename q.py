@@ -4,44 +4,50 @@ devices (Yubikeys) required to unlock a secret.
 """
 from glob import glob
 from hashlib import sha256
-from secrets import token_bytes, token_hex as randomHex
 import os, secrets, string
-import gfshare, fire
 from lib import *
+from crypto import Crypto
 
+import fire
+
+# Constants
 DEFAULT_BUNDLE_DIR = "./bundle"
+
+# LEFT OFF: 
+# 
+# openssl ... -certin ...
+# and pkcs15-crypt ... --pkcs1 ...
+#  works
+# So:
+# - Test that it works with bytes() values through a test line
+# - Change device enrollment to output certs
+# - Fix split
+# - Fix recover
 
 class Cli:
   """
   Command line interface to Q.
   """
-  def __init__(self):
-    pass
-
-  def enroll(self, bundleDir=DEFAULT_BUNDLE_DIR, adminPin=None, pin=None, 
-    managementKey=None):
+  def enroll(self, bundleDir=DEFAULT_BUNDLE_DIR, adminPin=None, 
+    pin=None, managementKey=None, changeAccessors=True):
     """
     Enrolls a new Yubikey device for secrets management. 
     """
-    # Converts numeric values to strings, but leaves None values the same.
-    def strOrNone(x):
-      if x is None:
-        return None
-      if type(x) == int:
-        return str(x)
-      else:
-        return x
-
     # Prompt the operator to insert a device
     Crypto.promptDeviceInsertion()
 
     # Reset PINs and management keys
-    ok, err, newPin, newAdminPin, newMgmKey = \
-      Crypto.newAccessors(
-        currentOpsPin=strOrNone(pin),
-        currentAdminPin=strOrNone(adminPin),
-        currentMgmKey=strOrNone(managementKey))
-    exitOnFail(ok, err)
+    if changeAccessors:
+      ok, err, newPin, newAdminPin, newMgmKey = \
+        Crypto.newAccessors(
+          currentOpsPin=strOrNone(pin),
+          currentAdminPin=strOrNone(adminPin),
+          currentMgmKey=strOrNone(managementKey))
+      exitOnFail(ok, err)
+    else:
+      newPin = strOrNone(pin)
+      newAdminPin = strOrNone(adminPin)
+      newMgmKey = strOrNone(managementKey)
 
     # Generate new keys
     print("Generating new key pair on device")
@@ -49,11 +55,21 @@ class Cli:
     devNumber, pubkeyfile = dm.newDevice()
     pubkeypath = f"{bundleDir}/{pubkeyfile}"
 
-    ok = Crypto.genPubkeyPair(pubkeypath, managementKey=newMgmKey)
+    ok, _ = Crypto.genPubkeyPair(managementKey=newMgmKey)
     exitOnFail(ok, "Failed to generate pubkey pair")
 
     ok, fp = Crypto.readPubkeyFingerprint()
     exitOnFail(ok, "Failed to read pubkey fingerprint from device")
+
+    # Write the device certificate to a file.
+    # NOTE: We've tried encrypt(openssl)/decrypt(pkcs15-crypt) 
+    # using pubkeys not certs. We were never able to get padding to
+    # work correctly. Instead we encrypt with cert and decrypt on
+    # Yubikey.
+    ok, cert = Crypto.readCertificate()
+    exitOnFail(ok)
+    with open(pubkeypath, 'wb') as f:
+      f.write(cert)
 
     # Update the device manifest 
     dm.addDevice(
@@ -83,6 +99,9 @@ class Cli:
 
     shares = Crypto.splitSecret(bits=length, k=k, n=n)
 
+    # DEBUG
+    print(shares)
+
     # Store information about each encrypted share
     shareManifest = ShareManifest.new(directory=bundleDir, k=k, n=n)
 
@@ -98,7 +117,7 @@ class Cli:
       sharefile = f"share-{coeff}.ctxt"
       ok = Crypto.encrypt(
         plaintext=share,
-        pubkeyfile=f"{bundleDir}/{pubkeyFilename}", 
+        certfile=f"{bundleDir}/{pubkeyFilename}", 
         ctxtfile=f"{bundleDir}/{sharefile}")
       exitOnFail(ok)
 
@@ -115,284 +134,59 @@ class Cli:
     """
     Recover a secret from a bundle of encrypted shares.
     """
-    # Load the manifest file.
-    manifest = ShareManifest.load(bundleDir)
+    # Load the manifest files.
+    shareManifest = ShareManifest.load(bundleDir)
+    deviceManifest = DeviceManifest.load(bundleDir)
 
-    # TODO: Verify the manifest contain the expected contents: k, n, etc
+    # TODO: Verify the shareManifest contain the expected contents: k, n, etc
     shares = {}
     shareMatcher = identifyShares(
-      sharesTable=manifest.shares, 
-      k=manifest.k)
-    for coeff, sharefile in shareMatcher:
-      ok, result = Crypto.decrypt(f"{bundleDir}/{sharefile}")
+      sharesTable=shareManifest.shares, 
+      k=shareManifest.k)
+
+    # Process k Yubikeys that match share files
+    for coeff, sharefile, pkfp in shareMatcher:
+      # Find the device so we can get it's PIN for decryption
+      device = deviceManifest.findDevice(pubkeyFingerprint=pkfp)
+      exitOnFail(device is not None, 
+        msg=f"Failed to find device in manifest file with "
+          "pubkeyFingerprint={pkfp}")
+
+      # Decrypt the sharenand store the result
+      ok, result = Crypto.decrypt(
+        ctxtfile=f"{bundleDir}/{sharefile}",
+        pin=device["operationsPin"])
       exitOnFail(ok)
+
       shares[coeff] = result
 
     # Recover the secret
-    print(b64enc(Crypto.recoverSecret(shares)))
+    print(shares)
+    print(Crypto.recoverSecret(shares))
 
-class Crypto:
-  """
-  Interface to crypto operations.
-  """
-  # We're using the 9c slot on Yubico device to store privkeys.
-  # This is not a requirement, just our convention.
-  # In the pkcs15-tool, this is designated key 3
-  YUBICO_PRIVKEY_SLOT = "9c"
-  PKCS15_KEY_NUMBER = "3"
-
-  # Default values for Yubikeys
-  DEFAULT_PIN="123456"
-  DEFAULT_ADMIN_PIN="12345678"
-  DEFAULT_MGMT_KEY="010203040506070801020304050607080102030405060708"
-
-  def newAccessors(currentOpsPin=None, currentAdminPin=None, currentMgmKey=None):
-    """
-    Change the operations PIN, admin PIN, and management key on a Yubikey
-    to secure, fresh, random values.
-    @return (ok, errMsg, newOpsPin, newAdminPin, newMgmKey)
-    """
-    newOpsPin, newAdminPin, newMgmKey = (Crypto.randomPin(6), Crypto.randomPin(8), 
-      randomHex(nbytes=24))
-
-    # DEBUG: Here for development
-    print(newOpsPin, newAdminPin, newMgmKey)
-
-    establishedOpsPin = None
-    establishedAdminPin = None
-    establishedMgmKey = None
-
-    # error = lambda msg: (False, msg, newOpsPin, newAdminPin, newMgmKey)
-
-    try:
-      ok, _ = Crypto.setMgmKey(current=currentMgmKey, new=newMgmKey)
-      if not ok:
-        raise ValueError("Failed to set management key", )
-      establishedMgmKey = newMgmKey
-
-      ok, _ = Crypto.setAdminPin(current=currentAdminPin, new=newAdminPin)
-      if not ok:
-        raise ValueError("Failed to set admin PIN")
-      establishedAdminPin = newAdminPin
-
-      ok, _ = Crypto.setPin(current=currentOpsPin, new=newOpsPin)
-      if not ok:
-        raise ValueError('Failed to set operations PIN (also called "user PIN")')
-      establishedOpsPin = newOpsPin
-
-    except Exception as e:
-      print("An error occurred while attempting to change accessor codes on a Yubikey")
-
-      # Print out any values that were set successfully, but haven't been recorded 
-      # anywhere yet
-      if establishedMgmKey or establishedAdminPin or establishedOpsPin:
-        print("Established the following new values on the device:")
-        if establishedOpsPin:
-          print(f"Operations PIN (user PIN): {establishedOpsPin}")
-
-        if establishedAdminPin:
-          print(f"Admin PIN (PUK): {establishedAdminPin}")
-
-        if establishedMgmKey:
-          print(f"Management key: {establishedMgmKey}")
-
-      return False, str(e), None, None, None
-
-
-    return True, None, newOpsPin, newAdminPin, newMgmKey
-
-  def randomPin(length):
-    """
-    Generates a (secure) random PIN of a given length.
-    """
-    return ''.join(secrets.choice(string.digits) for i in range(length))
-
-  def splitSecret(bits=128, k=3, n=5):
-    """
-    Generate a new secret and split into shares
-    """
-    if k > n:
-      raise ValueError(f"Quorum K cannot be larger than total number "
-        "of shares N. Instead found K={k} and N={n}")
-
-    secret = Crypto.randomBytes(bits=bits, noNullBytes=True)
-    return gfshare.split(k, n, secret)
-
-  def randomBytes(bits, noNullBytes):
-    """
-    Securely generates a fresh, random value. Ensures that value
-    has no null bytes, if requested.
-    """
-    while True:
-      value = token_bytes(nbytes=int(bits/8))
-      if 0 not in value:
-        return bytes(value)
-
-  def recoverSecret(shares):
-    """
-    Receovers a secret from a dict {coeff: share}
-    """
-    return gfshare.combine(shares)
-
-  def readPubkey():
-    """
-    Read the pubkey from an attached Yubikey
-    """
-    return run(
-      ["pkcs15-tool", 
-       "--read-public-key", Crypto.PKCS15_KEY_NUMBER])
-
-  def readPubkeyFingerprint():
-    """
-    Reads the pubkey fingerprint from a fixed slot of a Yubikey device.
-    """
-    ok, result = run(
-      ["yubico-piv-tool", 
-       "--action=status"
-      ])
+  def encrypt(self, pubkeyfile, ctxtfile):
+    ok = Crypto.encrypt(
+      plaintext="hello, world",
+      pubkeyfile=pubkeyfile,
+      ctxtfile=ctxtfile)
     if not ok:
-      return ok, result
+      print(f"ERROR: during encryption")
 
-    # Parse the status output and find the fingerprint for slot 9d
-    slotFound = False    
-    for line in result.decode().split("\n"):
-      line = line.strip()
-      if line.startswith(f"Slot {Crypto.YUBICO_PRIVKEY_SLOT}"):
-        slotFound = True
+  def decrypt(self, ctxtfile):
+    ok, result = Crypto.decrypt(ctxtfile, pin="685828")
+    if ok:
+      print(f"Recovered: '{result}'")
+    else:
+      print(f"ERROR: {result}")
 
-      if slotFound and line.startswith("Fingerprint:"):
-        fp = line.split(":")[1].strip()
-        return True, fp
+  def test(self):
+    # Encrypt/decrypt round trip does not give expected results
+    # Probably need unit test 
 
-    # Output didn't match the expected output
-    return False, None
-
-  def genPubkeyPair(pubkeyfile, managementKey=None):
-    """
-    Generates a new pubkey pair on a Yubico device using the 
-    yubico-piv-tool command (called via subprocess). Privkey is
-    stored on the device and pubkey is written to pubkeyfile.
-    """
-    cmd = ["yubico-piv-tool",
-        "--action=generate",
-        f"--slot={Crypto.YUBICO_PRIVKEY_SLOT}"]
-    if managementKey is not None:
-      cmd.append(f"--key={managementKey}")
-
-    ok, result = run(cmd)
-    if not ok:
-      return ok
-
-    # Write the pubkey to a file
-    with open(pubkeyfile, "wb") as out:
-      out.write(result)
-
-    return True
-
-  def promptDeviceInsertion(msg="Insert Yubikey and press enter: "):
-    """
-    Prompts for the operator to insert a key and probes the device with 
-    version command. Continues to prompt until a Yubikey is detected.
-    """
-    ok = False
-    while not ok:
-      input(msg)
-      # The version command will fail if a Yubico device is not present.
-      ok, _ = run(["yubico-piv-tool", "--action=version"], printErrorMsg=False)
-      if not ok:
-        print("Failed to detect device\n")
-
-  def setAdminPin(new, current=None):
-    """
-    Sets a Yubikey administrative PIN (8 digits) used for unblocking the user 
-    PIN after too many attempts). 
-    If @current is not specified, uses the default admin PIN.
-    """
-    current = current or Crypto.DEFAULT_ADMIN_PIN
-    def checkPin(p):
-      if len(p) != 8:
-        raise ValueError("Admin PIN (PUK) must be 8-digits")
-    checkPin(new)
-    checkPin(current)
-
-    return run(
-      ["yubico-piv-tool", 
-       "--action=change-puk",
-       f"--pin={current}",
-       f"--new-pin={new}"])
-
-  def setPin(new, current=None):
-    """
-    Sets the user PIN (6-digits)
-    """
-    current = current or Crypto.DEFAULT_PIN
-    def checkPin(p):
-      if len(p) != 6:
-        raise ValueError("User PIN must be 6-digits")
-    checkPin(new)
-    checkPin(current)
-
-    return run(
-      ["yubico-piv-tool",
-       "--action=change-pin",
-       f"--pin={current}",
-       f"--new-pin={new}"] )
-    
-  def setMgmKey(new, current=None):
-    """
-    Set the Yubikey management key (used to unblock and reconfigure the device)
-    using the yubico-piv-tool (called via subprocess). If @current is not 
-    specified, uses the default management key.
-    """
-    current = current or Crypto.DEFAULT_MGMT_KEY
-    return run(
-      ["yubico-piv-tool",
-        f"--key={current}", 
-        "--action=set-mgm-key",
-        f"--new-key={new}"
-        ])
-
-  def encrypt(plaintext, pubkeyfile, ctxtfile):
-    """
-    Encrypts (using OpenSSL called via subprocess) the plaintext 
-    using a pubkey read from a file. The resulting ciphertext is 
-    written to ctxfile.
-    """
-    ok, _ = runWithStdin(
-      cmd=["openssl", 
-        "pkeyutl", "-encrypt",
-        "-pubin",
-        "-inkey", pubkeyfile,
-        "-out", ctxtfile,
-      ], 
-      inputBytes=plaintext)
-    return ok
-
-  def decrypt(ctxtfile, pin="123456"):
-    return run(
-      ["pkcs15-crypt",
-        "--decipher", 
-        "-i", ctxtfile,
-        "t", "-o", "/dev/stdout", 
-        "--pkcs1", 
-        "-p", pin, 
-        "--key", Crypto.PKCS15_KEY_NUMBER
-      ])
-
-  def fingerprintFile(filename):
-    """
-    Generates base64 encoded fingerprint using SHA256 over a file.
-    Assumes small files.
-    """
-    blocksize = 65536
-    with open(filename, 'rb') as f:
-      return b64enc(sha256(f.read()).digest())
-
-  def fingerprint(datum):
-    """
-    Generates base64 encoded fingerprint using SHA256 over in-memory value.
-    """
-    return b64enc(sha256(toBytes(datum)).digest())
+    pkfile = "bundle/device-1.pubkey"
+    ctxfile = "test.ctxt"
+    self.encrypt(pkfile, ctxfile)
+    self.decrypt(ctxfile)
 
 def purgeSharefiles(dir):
   """
@@ -406,26 +200,27 @@ def identifyShares(sharesTable, k):
   Prompts the user to insert a Yubikey, identify the device by it's pubkey 
   fingerprint and match that against a shareManifest entry. Continues until it
   recovers k shares.
-  @yields: (coeff, sharefile)
+  @yields: (coeff, sharefile, pubkeyFingerprint)
   """
   # Returns each sharefile in turn
   def getShareDebug(sharesTable):
     for _,entry in sharesTable.items():
       print("entry", entry)
-      yield entry["coeff"], entry["sharefile"]
+      yield (entry["coeff"], entry["encryptedShareFile"], 
+          entry["pubkeyFingerprint"])
+
+  debugShareGenerator = getShareDebug(sharesTable)
 
   for i in range(k):
-    ok = False
-    while not ok:
-      coeff, shares = matchYubikey(
-        sharesTable=sharesTable,
-        prompt=f"Insert Yubikey and press enter [{i}/{k}]: ")
+    coeff, shares = matchYubikey(
+      sharesTable=sharesTable,
+      prompt=f"Insert Yubikey and press enter [{i+1}/{k}]: ")
 
-      # HACK: Instead of using the coeff,shares above; we use
-      #       each sharefile in turn because we're developing with 
-      #       a single yubikey.
-      # yield coeff, shares
-      yield from getShareDebug(sharesTable)
+    # HACK: Instead of using the coeff,shares above; we use
+    #       each sharefile in turn because we're developing with 
+    #       a single yubikey.
+    # yield coeff, shares
+    yield from debugShareGenerator
 
 def matchYubikey(sharesTable, prompt):
   """
@@ -453,13 +248,6 @@ def matchYubikey(sharesTable, prompt):
         return entry["coeff"], entry["encryptedShareFile"]
 
     print("This device doesn't match any shares")
-
-def exitOnFail(ok, msg=None):
-  if not ok and msg:
-    print(msg)
-  if not ok:
-    exit(1)
-
 
 usage = \
 """

@@ -1,7 +1,6 @@
 TODO
 
 - Fix recover cmd
-- Refactor device insertion code
 
 De-enroll a yubikey
 - This is tricky -- if the yubikey isn't present, it will be bricked without the codes
