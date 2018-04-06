@@ -99,9 +99,6 @@ class Cli:
 
     shares = Crypto.splitSecret(bits=length, k=k, n=n)
 
-    # DEBUG
-    print(shares)
-
     # Store information about each encrypted share
     shareManifest = ShareManifest.new(directory=bundleDir, k=k, n=n)
 
@@ -161,7 +158,6 @@ class Cli:
       shares[coeff] = result
 
     # Recover the secret
-    print(shares)
     print(Crypto.recoverSecret(shares))
 
   def encrypt(self, pubkeyfile, ctxtfile):
@@ -202,25 +198,21 @@ def identifyShares(sharesTable, k):
   recovers k shares.
   @yields: (coeff, sharefile, pubkeyFingerprint)
   """
-  # Returns each sharefile in turn
-  def getShareDebug(sharesTable):
-    for _,entry in sharesTable.items():
-      print("entry", entry)
-      yield (entry["coeff"], entry["encryptedShareFile"], 
-          entry["pubkeyFingerprint"])
-
-  debugShareGenerator = getShareDebug(sharesTable)
-
   for i in range(k):
-    coeff, shares = matchYubikey(
+    # HACK: Instead of using yielding this value, we're using
+    # this call to ensure that a yubikey with some known
+    # fingerprint is inserted
+    # Then we return shares in order because we're using a
+    # single yubikey for development
+
+    # yield matchYubikey(
+    matchYubikey(
       sharesTable=sharesTable,
       prompt=f"Insert Yubikey and press enter [{i+1}/{k}]: ")
 
-    # HACK: Instead of using the coeff,shares above; we use
-    #       each sharefile in turn because we're developing with 
-    #       a single yubikey.
-    # yield coeff, shares
-    yield from debugShareGenerator
+    entry = list(sharesTable.values())[i]
+    yield (entry["coeff"], entry["encryptedShareFile"], 
+          entry["pubkeyFingerprint"])
 
 def matchYubikey(sharesTable, prompt):
   """
